@@ -44,6 +44,18 @@ pub struct Cpu {
     pub inst_size: u64,
 }
 
+// Compute trap PC per Priv §5.1.10: vectored mode dispatches interrupts to base + cause_code*4.
+fn trap_pc(tvec: u64, cause: u64) -> u64 {
+    let base = tvec & !0x3;
+    let mode = tvec & 0x3;
+    let is_interrupt = (cause >> 63) != 0;
+    if is_interrupt && mode == 1 {
+        base + ((cause & !(1u64 << 63)) * 4)
+    } else {
+        base
+    }
+}
+
 impl Cpu {
     pub fn new(bus: Bus, entry: u64, trace: bool) -> Self {
         Self {
@@ -84,23 +96,26 @@ impl Cpu {
     }
 
     pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
-        // Delegate to S-mode when medeleg[cause] is set and the trap did not originate in M-mode.
-        // Per Priv §3.1.8: a trap is taken in S-mode iff (a) it did not originate in M-mode,
-        // (b) medeleg[cause]=1, and (c) current mode is less privileged than M-mode (U or S).
-        // Traps from M-mode are never delegated downward.
-        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode != PrivMode::M {
+        let is_interrupt = (cause >> 63) != 0;
+        let cause_code   = cause & !(1u64 << 63);
+        let deleg_reg    = if is_interrupt { self.csr.mideleg } else { self.csr.medeleg };
+        let delegated    = cause_code < 64  // only codes [0,64) are delegatable per Priv §3.1.8
+                           && (deleg_reg >> cause_code) & 1 == 1
+                           && self.mode != PrivMode::M;
+
+        if delegated {
             self.csr.s_trap_entry(self.mode == PrivMode::S);
             self.csr.sepc   = self.pc;
             self.csr.scause = cause;
             self.csr.stval  = tval;
-            self.pc  = self.csr.stvec & !0b11;
+            self.pc   = trap_pc(self.csr.stvec, cause);
             self.mode = PrivMode::S;
         } else {
             self.csr.trap_entry(self.mode as u64);
             self.csr.mepc   = self.pc;
             self.csr.mcause = cause;
             self.csr.mtval  = tval;
-            self.pc  = self.csr.mtvec & !0b11;
+            self.pc   = trap_pc(self.csr.mtvec, cause);
             self.mode = PrivMode::M;
         }
     }
@@ -272,5 +287,56 @@ mod tests {
         assert_eq!(c.pc, 0x8000_0200);
         assert_eq!(c.mode, PrivMode::S);
         assert_eq!(c.csr.mcause, 0); // M-mode registers untouched
+    }
+
+    #[test]
+    fn deliver_trap_interrupt_uses_mideleg_not_medeleg() {
+        let mut c = cpu();
+        c.csr.stvec   = 0x8000_0200;
+        c.csr.mtvec   = 0x8000_0100;
+        // Delegate MTI (cause 7, interrupt) to S-mode via mideleg
+        c.csr.mideleg = 1 << 7;
+        c.csr.medeleg = 0; // medeleg NOT set for cause 7
+        c.mode = PrivMode::S;
+        // Deliver interrupt: cause = (1<<63) | 7
+        c.deliver_trap((1u64 << 63) | 7, 0);
+        // Should go to stvec (delegated via mideleg), not mtvec
+        assert_eq!(c.mode, PrivMode::S);
+        assert_eq!(c.csr.scause, (1u64 << 63) | 7);
+        assert_eq!(c.csr.mcause, 0);
+    }
+
+    #[test]
+    fn deliver_trap_vectored_mode_interrupt() {
+        let mut c = cpu();
+        // mtvec = base 0x8000_0000 | MODE=1 (vectored)
+        c.csr.mtvec = 0x8000_0001;
+        // Deliver MTI interrupt: cause = (1<<63)|7
+        c.deliver_trap((1u64 << 63) | 7, 0);
+        // vectored: PC = base + cause_code * 4 = 0x8000_0000 + 7*4 = 0x8000_001C
+        assert_eq!(c.pc, 0x8000_001C);
+        assert_eq!(c.csr.mcause, (1u64 << 63) | 7);
+    }
+
+    #[test]
+    fn deliver_trap_vectored_mode_exception_uses_base() {
+        let mut c = cpu();
+        c.csr.mtvec = 0x8000_0001; // vectored mode
+        c.deliver_trap(8, 0);       // exception (no bit 63): always goes to base
+        assert_eq!(c.pc, 0x8000_0000); // base only, not base + 8*4
+    }
+
+    #[test]
+    fn deliver_trap_s_mode_vectored_stvec() {
+        let mut c = cpu();
+        c.csr.stvec   = 0x9000_0001; // S-mode vectored (base=0x9000_0000, MODE=1)
+        c.csr.mtvec   = 0x8000_0100;
+        c.csr.mideleg = 1 << 5;      // delegate STI (cause 5) to S-mode
+        c.mode = PrivMode::S;
+        c.csr.mstatus = 1 << 1;      // SIE=1
+        c.deliver_trap((1u64 << 63) | 5, 0); // STI interrupt
+        assert_eq!(c.pc, 0x9000_0014); // 0x9000_0000 + 5*4 = 0x9000_0014
+        assert_eq!(c.mode, PrivMode::S);
+        assert_eq!(c.csr.scause, (1u64 << 63) | 5);
     }
 }

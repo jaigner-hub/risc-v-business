@@ -130,7 +130,7 @@ impl Csr {
             0x300 => self.mstatus  = val & !0x0000_000F_0000_0000u64,
             0x301 => {}            // misa: read-only
             0x304 => self.mie      = val,
-            0x305 => self.mtvec    = val & !0x3,  // only direct mode (MODE=0) supported
+            0x305 => self.mtvec    = val,
             0x340 => self.mscratch = val,
             0x341 => self.mepc     = val & !0x3,  // IALIGN=32: bits[1:0] always 0
             0x342 => self.mcause   = val,
@@ -271,5 +271,12 @@ mod tests {
         let mut csr = Csr::new();
         csr.write(0x302, 0xB109);
         assert_eq!(csr.read(0x302), 0xB109);
+    }
+
+    #[test]
+    fn mtvec_stores_vectored_mode_bits() {
+        let mut csr = Csr::new();
+        csr.write(0x305, 0x8000_1001); // base=0x8000_1000, MODE=1 (vectored)
+        assert_eq!(csr.read(0x305), 0x8000_1001);
     }
 }
