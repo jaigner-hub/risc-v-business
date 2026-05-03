@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds rv64ui-p-* test ELFs from source and copies them to tests/riscv-tests/.
+# Builds rv64ui/um/ua/mi-p-* test ELFs from source and copies them to tests/riscv-tests/.
 # Requires: riscv64-unknown-elf-gcc (or riscv64-linux-gnu-gcc), autoconf, make.
 # On Ubuntu/Debian: sudo apt install gcc-riscv64-unknown-elf autoconf
 set -euo pipefail
@@ -18,14 +18,29 @@ echo "Configuring..."
 autoconf
 ./configure --prefix="$WORK/install"
 
-echo "Building isa tests..."
-make isa -j"$(nproc)"
+echo "Building isa tests (p-environment only; v-environment failures are ignored)..."
+# Use -k || true so that failures in rv64*-v-* tests (missing libc headers) don't abort us.
+make isa -k -j"$(nproc)" 2>/dev/null || true
 
 echo "Copying rv64ui-p-* to $DEST..."
 mkdir -p "$DEST"
-# Exclude .dump files (disassembly listings) and .o files
 find "$WORK/riscv-tests/isa" -name 'rv64ui-p-*' ! -name '*.dump' ! -name '*.o' \
     -exec cp {} "$DEST/" \;
 
-echo "Done. $(ls "$DEST" | grep -c rv64ui-p-) test ELFs copied."
-echo "Now run: git add tests/riscv-tests && git commit -m 'test: vendor rv64ui-p-* ELFs'"
+echo "Copying rv64um-p-* to $DEST..."
+find "$WORK/riscv-tests/isa" -name 'rv64um-p-*' ! -name '*.dump' ! -name '*.o' \
+    -exec cp {} "$DEST/" \;
+
+echo "Copying rv64ua-p-* to $DEST..."
+find "$WORK/riscv-tests/isa" -name 'rv64ua-p-*' ! -name '*.dump' ! -name '*.o' \
+    -exec cp {} "$DEST/" \;
+
+echo "Copying rv64mi-p-* to $DEST..."
+find "$WORK/riscv-tests/isa" -name 'rv64mi-p-*' ! -name '*.dump' ! -name '*.o' \
+    -exec cp {} "$DEST/" \;
+
+echo "Done."
+echo "  rv64ui: $(ls "$DEST" | grep -c 'rv64ui-p-') ELFs"
+echo "  rv64um: $(ls "$DEST" | grep -c 'rv64um-p-') ELFs"
+echo "  rv64ua: $(ls "$DEST" | grep -c 'rv64ua-p-') ELFs"
+echo "  rv64mi: $(ls "$DEST" | grep -c 'rv64mi-p-') ELFs"

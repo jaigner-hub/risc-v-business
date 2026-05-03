@@ -34,7 +34,11 @@ fn main() {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if !name.starts_with("rv64ui-p-") || name.ends_with(".dump") || name.ends_with(".o") || name == ".gitkeep" {
+            let is_test_elf = name.starts_with("rv64ui-p-")
+                || name.starts_with("rv64um-p-")
+                || name.starts_with("rv64ua-p-")
+                || name.starts_with("rv64mi-p-");
+            if !is_test_elf || name.ends_with(".dump") || name.ends_with(".o") || name == ".gitkeep" {
                 continue;
             }
             found = true;
