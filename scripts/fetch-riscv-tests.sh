@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds rv64ui/um/ua/mi-p-* test ELFs from source and copies them to tests/riscv-tests/.
+# Builds rv64ui/um/ua/mi/si-p-* and rv64ui-v-* test ELFs from source and copies them to tests/riscv-tests/.
 # Requires: riscv64-unknown-elf-gcc (or riscv64-linux-gnu-gcc), autoconf, make.
 # On Ubuntu/Debian: sudo apt install gcc-riscv64-unknown-elf autoconf
 set -euo pipefail
@@ -18,9 +18,15 @@ echo "Configuring..."
 autoconf
 ./configure --prefix="$WORK/install"
 
-echo "Building isa tests (p-environment only; v-environment failures are ignored)..."
-# Use -k || true so that failures in rv64*-v-* tests (missing libc headers) don't abort us.
-make isa -k -j"$(nproc)" 2>/dev/null || true
+echo "Building isa tests..."
+# picolibc provides string.h/stdint.h needed by the v-environment harness.
+# -k || true ensures a single test failure doesn't abort the whole build.
+PICOLIBC_INC=/usr/lib/picolibc/riscv64-unknown-elf/include
+EXTRA_OPTS=""
+[ -d "$PICOLIBC_INC" ] && EXTRA_OPTS="-I$PICOLIBC_INC"
+make isa -k -j"$(nproc)" \
+    RISCV_GCC_OPTS="-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles $EXTRA_OPTS" \
+    2>/dev/null || true
 
 echo "Copying rv64ui-p-* to $DEST..."
 mkdir -p "$DEST"
@@ -43,9 +49,14 @@ echo "Copying rv64si-p-* to $DEST..."
 find "$WORK/riscv-tests/isa" -name 'rv64si-p-*' ! -name '*.dump' ! -name '*.o' \
     -exec cp {} "$DEST/" \;
 
+echo "Copying rv64ui-v-* to $DEST..."
+find "$WORK/riscv-tests/isa" -name 'rv64ui-v-*' ! -name '*.dump' ! -name '*.o' \
+    -exec cp {} "$DEST/" \;
+
 echo "Done."
-echo "  rv64ui: $(ls "$DEST" | grep -c 'rv64ui-p-') ELFs"
-echo "  rv64um: $(ls "$DEST" | grep -c 'rv64um-p-') ELFs"
-echo "  rv64ua: $(ls "$DEST" | grep -c 'rv64ua-p-') ELFs"
-echo "  rv64mi: $(ls "$DEST" | grep -c 'rv64mi-p-') ELFs"
-echo "  rv64si: $(ls "$DEST" | grep -c 'rv64si-p-') ELFs"
+echo "  rv64ui-p: $(ls "$DEST" | grep -c 'rv64ui-p-') ELFs"
+echo "  rv64um:   $(ls "$DEST" | grep -c 'rv64um-p-') ELFs"
+echo "  rv64ua:   $(ls "$DEST" | grep -c 'rv64ua-p-') ELFs"
+echo "  rv64mi:   $(ls "$DEST" | grep -c 'rv64mi-p-') ELFs"
+echo "  rv64si:   $(ls "$DEST" | grep -c 'rv64si-p-') ELFs"
+echo "  rv64ui-v: $(ls "$DEST" | grep -c 'rv64ui-v-') ELFs"
