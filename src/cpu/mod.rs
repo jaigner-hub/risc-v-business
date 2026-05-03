@@ -6,6 +6,11 @@ use crate::bus::Bus;
 use anyhow::Result;
 use csr::Csr;
 
+pub mod mmu;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivMode { U = 0, S = 1, M = 3 }
+
 pub struct Tracer {
     pub enabled: bool,
 }

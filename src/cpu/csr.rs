@@ -8,6 +8,8 @@ pub struct Csr {
     pub mcause:   u64,
     pub mtval:    u64,
     pub mip:      u64,
+    pub medeleg:  u64,
+    pub mideleg:  u64,
     pub stvec:    u64,
     pub sscratch: u64,
     pub sepc:     u64,
@@ -31,6 +33,8 @@ impl Csr {
             mcause:   0,
             mtval:    0,
             mip:      0,
+            medeleg:  0,
+            mideleg:  0,
             stvec:    0,
             sscratch: 0,
             sepc:     0,
@@ -69,6 +73,15 @@ impl Csr {
             0xf12 => 0, // marchid
             0xf13 => 0, // mimpid
             0xf14 => 0, // mhartid
+            // sstatus: S-mode view of mstatus. UXL[33:32] hardwired 2.
+            // SSTATUS_MASK covers: SD[63], UXL[33:32], MXR[19], SUM[18], XS[16:15],
+            //   FS[14:13], SPP[8], UBE[6], SPIE[5], SIE[1]. Priv §4.1.1
+            0x100 => (self.mstatus | 0x0000_0002_0000_0000) & 0x8000_0003_000D_E162,
+            0x104 => self.mie  & 0x222,  // sie: SSIE[1], STIE[5], SEIE[9]. Priv §4.1.3
+            0x106 => 0,                  // scounteren: stub reads 0. Priv §4.1.5
+            0x144 => self.mip  & 0x222,  // sip: S-mode view of mip. Priv §4.1.4
+            0x302 => self.medeleg,       // medeleg. Priv §3.1.8
+            0x303 => self.mideleg,       // mideleg. Priv §3.1.8
             _ => 0,
         }
     }
@@ -89,6 +102,23 @@ impl Csr {
         self.mstatus = (self.mstatus & !0x1888u64) // clear MIE[3], MPIE[7], MPP[12:11]
             | (mpie << 3)                          // MIE ← MPIE
             | (1u64 << 7);                         // MPIE ← 1
+    }
+
+    /// Called on trap delivery to S-mode. Saves SIE into SPIE; sets SPP to prior mode.
+    /// from_smode: true if the trap was taken from S-mode (SPP=1), false if from U-mode (SPP=0).
+    pub fn s_trap_entry(&mut self, from_smode: bool) {
+        let sie = (self.mstatus >> 1) & 1;
+        self.mstatus = (self.mstatus & !0x122u64) // clear SIE[1], SPIE[5], SPP[8]
+            | (sie << 5)                           // SPIE ← SIE
+            | ((from_smode as u64) << 8);          // SPP ← 1 if from S, 0 if from U
+    }
+
+    /// Called by SRET. Restores SIE←SPIE, sets SPIE←1, clears SPP to U.
+    pub fn s_ret(&mut self) {
+        let spie = (self.mstatus >> 5) & 1;
+        self.mstatus = (self.mstatus & !0x122u64) // clear SIE[1], SPIE[5], SPP[8]
+            | (spie << 1)                          // SIE ← SPIE
+            | (1u64 << 5);                         // SPIE ← 1, SPP ← 0 (U)
     }
 
     pub fn write(&mut self, addr: u16, val: u64) {
@@ -114,6 +144,15 @@ impl Csr {
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,
             // Read-only: silently ignore
             0xf11..=0xf14 => {}
+            // sstatus write: only update S-mode writable bits in mstatus.
+            // Writable SSTATUS bits (no SD, no UXL): 0x0000_0000_000D_E162
+            0x100 => self.mstatus = (self.mstatus & !0x0000_0000_000D_E162)
+                                    | (val         &  0x0000_0000_000D_E162),
+            0x104 => self.mie  = (self.mie  & !0x222) | (val & 0x222),
+            0x106 => {}                 // scounteren: writes ignored
+            0x144 => self.mip  = (self.mip  & !0x222) | (val & 0x222),
+            0x302 => self.medeleg = val,
+            0x303 => self.mideleg = val,
             _ => {} // unimplemented or read-only: silently ignore (Priv §2.1)
         }
     }
@@ -173,5 +212,61 @@ mod tests {
         csr.mret();
         assert_eq!(csr.mie_bit(), 1);           // MIE restored
         assert_eq!((csr.mstatus >> 7) & 1, 1);  // MPIE set to 1
+    }
+
+    #[test]
+    fn s_trap_entry_from_u_mode() {
+        let mut csr = Csr::new();
+        csr.mstatus = 0b0000_0010; // SIE=1 (bit 1)
+        csr.s_trap_entry(false);   // from U-mode → SPP=0
+        assert_eq!((csr.mstatus >> 1) & 1,  0); // SIE cleared
+        assert_eq!((csr.mstatus >> 5) & 1,  1); // SPIE = old SIE
+        assert_eq!((csr.mstatus >> 8) & 1,  0); // SPP = U-mode
+    }
+
+    #[test]
+    fn s_trap_entry_from_s_mode() {
+        let mut csr = Csr::new();
+        csr.mstatus = 0b0000_0010; // SIE=1
+        csr.s_trap_entry(true);    // from S-mode → SPP=1
+        assert_eq!((csr.mstatus >> 8) & 1, 1); // SPP = S-mode
+    }
+
+    #[test]
+    fn s_ret_restores_sie() {
+        let mut csr = Csr::new();
+        csr.mstatus = 0b0010_0000; // SPIE=1 (bit 5)
+        csr.s_ret();
+        assert_eq!((csr.mstatus >> 1) & 1, 1); // SIE ← SPIE=1
+        assert_eq!((csr.mstatus >> 5) & 1, 1); // SPIE ← 1
+        assert_eq!((csr.mstatus >> 8) & 1, 0); // SPP ← 0 (U)
+    }
+
+    #[test]
+    fn sstatus_filters_mstatus() {
+        let mut csr = Csr::new();
+        csr.mstatus = 0x2;
+        let sstatus = csr.read(0x100);
+        assert_eq!(sstatus & 0x2, 0x2);                  // SIE visible
+        assert_eq!((sstatus >> 32) & 3, 2);              // UXL=2 hardwired
+        csr.mstatus = 0x8; // MIE=1
+        assert_eq!(csr.read(0x100) & 0x8, 0);            // MIE hidden in sstatus
+    }
+
+    #[test]
+    fn sie_filters_mie() {
+        let mut csr = Csr::new();
+        csr.mie = 0xFFFF_FFFF;
+        assert_eq!(csr.read(0x104), 0x222); // only SSIE/STIE/SEIE visible
+        csr.write(0x104, 0xFFFF);
+        assert_eq!(csr.mie & !0x222, 0xFFFF_FFFF & !0x222); // M-mode bits unchanged
+        assert_eq!(csr.mie & 0x222, 0x222);                  // S-mode bits updated
+    }
+
+    #[test]
+    fn medeleg_round_trips() {
+        let mut csr = Csr::new();
+        csr.write(0x302, 0xB109);
+        assert_eq!(csr.read(0x302), 0xB109);
     }
 }
