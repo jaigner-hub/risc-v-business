@@ -221,6 +221,7 @@ mod tests {
         assert_eq!(c.mode, PrivMode::S);
         // M-mode registers untouched
         assert_eq!(c.csr.mcause, 0);
+        assert_eq!(c.csr.sepc, 0x8000_0000);
     }
 
     #[test]
