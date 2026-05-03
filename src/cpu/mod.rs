@@ -78,17 +78,40 @@ impl Cpu {
     }
 
     /// Fetch, decode, execute one instruction. Advances pc.
-    /// Fully wired up in Task 8 once decode() and execute() exist.
+    /// Fetch faults deliver mcause=1; decode failures deliver mcause=2.
+    /// Execute errors still propagate as Err.
     pub fn step(&mut self) -> Result<()> {
-        use decode::decode;
+        use decode::{decode, IllegalInstruction};
         use execute::execute;
 
-        let raw = self.bus.load(self.pc, 4)? as u32;
-        let inst = decode(raw)?;
+        let pc = self.pc;
 
+        // Instruction fetch — bus error → mcause=1 (instruction access fault)
+        let raw = match self.bus.load(pc, 4) {
+            Ok(v) => v as u32,
+            Err(_) => {
+                self.deliver_trap(1, pc);
+                return Ok(());
+            }
+        };
+
+        // Decode — IllegalInstruction → mcause=2, mtval=raw bits
+        let inst = match decode(raw) {
+            Ok(i) => i,
+            Err(e) => {
+                let tval = if e.downcast_ref::<IllegalInstruction>().is_some() {
+                    raw as u64
+                } else {
+                    0
+                };
+                self.deliver_trap(2, tval);
+                return Ok(());
+            }
+        };
+
+        // Execute (tracing path or fast path)
         if self.tracer.enabled {
             let before = self.regs;
-            let pc = self.pc;
             let mnemonic = format!("{inst:?}");
             let short = mnemonic.split(' ').next().unwrap_or(&mnemonic).to_owned();
             execute(self, inst)?;
@@ -124,5 +147,32 @@ mod tests {
         let mut c = cpu();
         c.set_reg(5, 0xCAFE);
         assert_eq!(c.reg(5), 0xCAFE);
+    }
+
+    #[test]
+    fn step_delivers_illegal_instruction_trap() {
+        let mut c = Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false);
+        // Write mtvec = 0x8000_0010 (direct mode)
+        c.csr.mtvec = 0x8000_0010;
+        // Write an illegal instruction (0xDEAD_BEFF) at PC
+        c.bus.store(0x8000_0000, 4, 0xDEAD_BEFFu64).unwrap();
+        // step() should NOT return an error; it should deliver the trap
+        c.step().unwrap();
+        assert_eq!(c.pc, 0x8000_0010);         // jumped to mtvec
+        assert_eq!(c.csr.mcause, 2);           // illegal instruction cause
+        assert_eq!(c.csr.mtval, 0xDEAD_BEFF); // raw bits
+        assert_eq!(c.csr.mepc, 0x8000_0000);  // PC of faulting instruction
+    }
+
+    #[test]
+    fn step_delivers_fetch_fault_on_bad_address() {
+        let mut c = Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false);
+        c.csr.mtvec = 0x8000_0010;
+        // Point PC at an unmapped address (outside RAM)
+        c.pc = 0x0000_0000;
+        c.step().unwrap();
+        assert_eq!(c.pc, 0x8000_0010);
+        assert_eq!(c.csr.mcause, 1); // instruction access fault
+        assert_eq!(c.csr.mtval, 0x0000_0000);
     }
 }
