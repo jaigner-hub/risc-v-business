@@ -130,6 +130,8 @@ fn main() -> Result<()> {
     use riscv_emu::jit::JitCache;
     let mut jit = JitCache::new();
     let mut tick: u64 = 0;
+    let mut last_diag = std::time::Instant::now();
+    let mut last_pc: u64 = 0;
 
     loop {
         // Scale tick by estimated instructions per JIT block so CLINT fires every
@@ -188,6 +190,23 @@ fn main() -> Result<()> {
                 cpu.csr.mip |= 1 << 9;
             } else {
                 cpu.csr.mip &= !(1u64 << 9);
+            }
+
+            // Emit a diagnostic line to stderr every 5 seconds of wall time.
+            // Shows whether the emulator is making forward progress (PC moving)
+            // or is stuck in a tight loop, and which code range is hot.
+            let now = std::time::Instant::now();
+            if now.duration_since(last_diag).as_secs() >= 5 {
+                last_diag = now;
+                let mode_str = match cpu.mode {
+                    PrivMode::M => "M",
+                    PrivMode::S => "S",
+                    PrivMode::U => "U",
+                };
+                let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
+                eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit_blocks={:>5}  {}",
+                          cpu.pc, mode_str, tick, jit.len(), moving);
+                last_pc = cpu.pc;
             }
         }
     }

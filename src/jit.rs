@@ -721,6 +721,11 @@ impl JitCache {
         self.blocks.clear();
     }
 
+    /// Number of compiled blocks currently in the cache.
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
     /// Compile the basic block starting at guest virtual address `start_pc`.
     /// No-op if the block is already cached. The block ends at the first
     /// unhandled instruction (slow-path return), or after 64 instructions
