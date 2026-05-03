@@ -39,6 +39,9 @@ pub struct Cpu {
     pub reservation: Option<u64>,
     pub mode: PrivMode,
     pub mmu: mmu::Mmu,
+    /// Size of the current instruction in bytes (4 for full, 2 for RVC).
+    /// execute() reads this to compute link-register and next-PC values.
+    pub inst_size: u64,
 }
 
 impl Cpu {
@@ -52,6 +55,7 @@ impl Cpu {
             reservation: None,
             mode: PrivMode::M,
             mmu: mmu::Mmu::new(),
+            inst_size: 4,
         }
     }
 
@@ -105,13 +109,13 @@ impl Cpu {
     /// Fetch faults deliver mcause=1; decode failures deliver mcause=2.
     /// Execute errors still propagate as Err.
     pub fn step(&mut self) -> Result<()> {
-        use decode::decode;
+        use decode::{decode, decode_rvc};
         use execute::execute;
 
         let pc = self.pc;
 
-        // Misaligned PC → mcause=0 (instruction address misaligned)
-        if pc & 0x3 != 0 {
+        // RVC allows 2-byte aligned PCs; only odd addresses are illegal.
+        if pc & 0x1 != 0 {
             self.deliver_trap(0, pc);
             return Ok(());
         }
@@ -127,12 +131,21 @@ impl Cpu {
             }
         };
 
+        // Detect RVC (16-bit) vs full (32-bit) instruction.
+        let is_rvc = raw & 0x3 != 0x3;
+
         // Decode — any error is an illegal instruction; raw bits go into mtval
-        let inst = match decode(raw) {
-            Ok(i) => i,
-            Err(_) => {
-                self.deliver_trap(2, raw as u64);
-                return Ok(());
+        let inst = if is_rvc {
+            self.inst_size = 2;
+            match decode_rvc(raw as u16) {
+                Ok(i) => i,
+                Err(_) => { self.deliver_trap(2, (raw & 0xffff) as u64); return Ok(()); }
+            }
+        } else {
+            self.inst_size = 4;
+            match decode(raw) {
+                Ok(i) => i,
+                Err(_) => { self.deliver_trap(2, raw as u64); return Ok(()); }
             }
         };
 

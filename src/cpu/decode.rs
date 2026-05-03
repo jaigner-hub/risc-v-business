@@ -352,6 +352,239 @@ pub fn decode(inst: u32) -> Result<Instruction> {
     }
 }
 
+/// Decode a 16-bit RVC instruction into the equivalent full Instruction.
+/// Spec: Unprivileged §16 (C extension, RV64 profile).
+/// Returns Err(IllegalInstruction) for reserved encodings.
+pub fn decode_rvc(inst: u16) -> Result<Instruction> {
+    let w = inst as u32;
+    let quad   = w & 0x3;
+    let funct3 = (w >> 13) & 0x7;
+
+    // Compressed register field: 3-bit encoding maps to x8..x15.
+    let rp = |shift: u32| -> usize { (8 + ((w >> shift) & 0x7)) as usize };
+
+    match quad {
+        // ── Quadrant 00 ────────────────────────────────────────────────────────
+        0b00 => {
+            let rd_p  = rp(2);
+            let rs1_p = rp(7);
+            match funct3 {
+                0b000 => {
+                    // C.ADDI4SPN: addi rd', sp, nzuimm  (nzuimm must be nonzero)
+                    let uimm = ((w >> 6) & 1) << 2   // inst[6]    → imm[2]
+                             | ((w >> 5) & 1) << 3   // inst[5]    → imm[3]
+                             | ((w >> 11) & 3) << 4  // inst[12:11]→ imm[5:4]
+                             | ((w >> 7) & 0xf) << 6;// inst[10:7] → imm[9:6]
+                    if uimm == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                    Ok(Instruction::Addi { rd: rd_p, rs1: 2, imm: uimm as i64 })
+                }
+                0b010 => {
+                    // C.LW: lw rd', uimm(rs1')
+                    let uimm = ((w >> 6) & 1) << 2
+                             | ((w >> 10) & 7) << 3  // inst[12:10]→ imm[5:3]
+                             | ((w >> 5) & 1) << 6;  // inst[5]    → imm[6]
+                    Ok(Instruction::Lw { rd: rd_p, rs1: rs1_p, imm: uimm as i64 })
+                }
+                0b011 => {
+                    // C.LD (RV64): ld rd', uimm(rs1')
+                    let uimm = ((w >> 10) & 7) << 3  // inst[12:10]→ imm[5:3]
+                             | ((w >> 5) & 3) << 6;  // inst[6:5]  → imm[7:6]
+                    Ok(Instruction::Ld { rd: rd_p, rs1: rs1_p, imm: uimm as i64 })
+                }
+                0b110 => {
+                    // C.SW: sw rs2', uimm(rs1')
+                    let rs2_p = rp(2);
+                    let uimm = ((w >> 6) & 1) << 2
+                             | ((w >> 10) & 7) << 3
+                             | ((w >> 5) & 1) << 6;
+                    Ok(Instruction::Sw { rs1: rs1_p, rs2: rs2_p, imm: uimm as i64 })
+                }
+                0b111 => {
+                    // C.SD (RV64): sd rs2', uimm(rs1')
+                    let rs2_p = rp(2);
+                    let uimm = ((w >> 10) & 7) << 3
+                             | ((w >> 5) & 3) << 6;
+                    Ok(Instruction::Sd { rs1: rs1_p, rs2: rs2_p, imm: uimm as i64 })
+                }
+                _ => Err(anyhow::Error::new(IllegalInstruction(w))),
+            }
+        }
+
+        // ── Quadrant 01 ────────────────────────────────────────────────────────
+        0b01 => {
+            let rd_rs1 = ((w >> 7) & 0x1f) as usize;
+            // 6-bit signed immediate: bit[12] is sign, bits[6:2] are low 5.
+            let imm6 = {
+                let raw = ((w >> 12) & 1) << 5 | ((w >> 2) & 0x1f);
+                if (raw >> 5) & 1 == 1 { (raw as i64) | (-64i64) } else { raw as i64 }
+            };
+
+            match funct3 {
+                0b000 => {
+                    // C.NOP (rd=0) / C.ADDI: addi rd, rd, sext(imm6)
+                    Ok(Instruction::Addi { rd: rd_rs1, rs1: rd_rs1, imm: imm6 })
+                }
+                0b001 => {
+                    // C.ADDIW (RV64): addiw rd, rd, sext(imm6)  (rd must be nonzero)
+                    if rd_rs1 == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                    Ok(Instruction::Addiw { rd: rd_rs1, rs1: rd_rs1, imm: imm6 })
+                }
+                0b010 => {
+                    // C.LI: addi rd, x0, sext(imm6)
+                    Ok(Instruction::Addi { rd: rd_rs1, rs1: 0, imm: imm6 })
+                }
+                0b011 => {
+                    if rd_rs1 == 2 {
+                        // C.ADDI16SP: addi sp, sp, nzimm (×16 encoded)
+                        let raw = ((w >> 12) & 1) << 9   // inst[12] → nzimm[9]
+                                | ((w >> 3) & 3) << 7    // inst[4:3] → nzimm[8:7]
+                                | ((w >> 5) & 1) << 6    // inst[5]   → nzimm[6]
+                                | ((w >> 2) & 1) << 5    // inst[2]   → nzimm[5]
+                                | ((w >> 6) & 1) << 4;   // inst[6]   → nzimm[4]
+                        let nzimm = if (raw >> 9) & 1 == 1 { (raw as i64) | !0x3ff } else { raw as i64 };
+                        if nzimm == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                        Ok(Instruction::Addi { rd: 2, rs1: 2, imm: nzimm })
+                    } else if rd_rs1 != 0 {
+                        // C.LUI: lui rd, nzimm[17:12]
+                        let raw = ((w >> 12) & 1) << 17
+                                | ((w >> 2) & 0x1f) << 12;
+                        let nzimm = if (raw >> 17) & 1 == 1 { (raw as i64) | !0x3ffff } else { raw as i64 };
+                        if nzimm == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                        Ok(Instruction::Lui { rd: rd_rs1, imm: nzimm })
+                    } else {
+                        Err(anyhow::Error::new(IllegalInstruction(w)))
+                    }
+                }
+                0b100 => {
+                    let funct2 = (w >> 10) & 0x3;
+                    let rd_p  = rp(7);
+                    let rs2_p = rp(2);
+                    let shamt = (((w >> 12) & 1) << 5 | ((w >> 2) & 0x1f)) as u32;
+                    let simm  = { // 6-bit signed for C.ANDI
+                        let r = ((w >> 12) & 1) << 5 | ((w >> 2) & 0x1f);
+                        if (r >> 5) & 1 == 1 { (r as i64) | (-64i64) } else { r as i64 }
+                    };
+                    match funct2 {
+                        0b00 => Ok(Instruction::Srli { rd: rd_p, rs1: rd_p, shamt }),
+                        0b01 => Ok(Instruction::Srai { rd: rd_p, rs1: rd_p, shamt }),
+                        0b10 => Ok(Instruction::Andi { rd: rd_p, rs1: rd_p, imm: simm }),
+                        0b11 => {
+                            let bit12 = (w >> 12) & 1;
+                            let funct  = (w >> 5) & 0x3;
+                            match (bit12, funct) {
+                                (0, 0b00) => Ok(Instruction::Sub  { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                (0, 0b01) => Ok(Instruction::Xor  { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                (0, 0b10) => Ok(Instruction::Or   { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                (0, 0b11) => Ok(Instruction::And  { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                (1, 0b00) => Ok(Instruction::Subw { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                (1, 0b01) => Ok(Instruction::Addw { rd: rd_p, rs1: rd_p, rs2: rs2_p }),
+                                _ => Err(anyhow::Error::new(IllegalInstruction(w))),
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                0b101 => {
+                    // C.J: jal x0, sext(imm11)
+                    let raw = ((w >> 12) & 1) << 11  // inst[12] → imm[11]
+                            | ((w >> 11) & 1) << 4   // inst[11] → imm[4]
+                            | ((w >> 9) & 3) << 8    // inst[10:9]→ imm[9:8]
+                            | ((w >> 8) & 1) << 10   // inst[8]  → imm[10]
+                            | ((w >> 7) & 1) << 6    // inst[7]  → imm[6]
+                            | ((w >> 6) & 1) << 7    // inst[6]  → imm[7]
+                            | ((w >> 3) & 7) << 1    // inst[5:3]→ imm[3:1]
+                            | ((w >> 2) & 1) << 5;   // inst[2]  → imm[5]
+                    let imm = if (raw >> 11) & 1 == 1 { (raw as i64) | !0x7ff } else { raw as i64 };
+                    Ok(Instruction::Jal { rd: 0, imm })
+                }
+                0b110 => {
+                    // C.BEQZ: beq rs1', x0, sext(imm8)
+                    let rs1_p = rp(7);
+                    let raw = ((w >> 12) & 1) << 8
+                            | ((w >> 10) & 3) << 3   // inst[11:10]→ imm[4:3]
+                            | ((w >> 5) & 3) << 6    // inst[6:5]  → imm[7:6]
+                            | ((w >> 3) & 3) << 1    // inst[4:3]  → imm[2:1]
+                            | ((w >> 2) & 1) << 5;   // inst[2]    → imm[5]
+                    let imm = if (raw >> 8) & 1 == 1 { (raw as i64) | !0xff } else { raw as i64 };
+                    Ok(Instruction::Beq { rs1: rs1_p, rs2: 0, imm })
+                }
+                0b111 => {
+                    // C.BNEZ: bne rs1', x0, sext(imm8)
+                    let rs1_p = rp(7);
+                    let raw = ((w >> 12) & 1) << 8
+                            | ((w >> 10) & 3) << 3
+                            | ((w >> 5) & 3) << 6
+                            | ((w >> 3) & 3) << 1
+                            | ((w >> 2) & 1) << 5;
+                    let imm = if (raw >> 8) & 1 == 1 { (raw as i64) | !0xff } else { raw as i64 };
+                    Ok(Instruction::Bne { rs1: rs1_p, rs2: 0, imm })
+                }
+                _ => Err(anyhow::Error::new(IllegalInstruction(w))),
+            }
+        }
+
+        // ── Quadrant 10 ────────────────────────────────────────────────────────
+        0b10 => {
+            let rd_rs1 = ((w >> 7) & 0x1f) as usize;
+            let rs2    = ((w >> 2) & 0x1f) as usize;
+            match funct3 {
+                0b000 => {
+                    // C.SLLI: slli rd, rd, shamt
+                    let shamt = (((w >> 12) & 1) << 5 | ((w >> 2) & 0x1f)) as u32;
+                    Ok(Instruction::Slli { rd: rd_rs1, rs1: rd_rs1, shamt })
+                }
+                0b010 => {
+                    // C.LWSP: lw rd, uimm(sp)  (rd must be nonzero)
+                    if rd_rs1 == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                    let uimm = ((w >> 12) & 1) << 5
+                             | ((w >> 4) & 7) << 2   // inst[6:4] → imm[4:2]
+                             | ((w >> 2) & 3) << 6;  // inst[3:2] → imm[7:6]
+                    Ok(Instruction::Lw { rd: rd_rs1, rs1: 2, imm: uimm as i64 })
+                }
+                0b011 => {
+                    // C.LDSP (RV64): ld rd, uimm(sp)  (rd must be nonzero)
+                    if rd_rs1 == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
+                    let uimm = ((w >> 12) & 1) << 5
+                             | ((w >> 5) & 3) << 3   // inst[6:5] → imm[4:3]
+                             | ((w >> 2) & 7) << 6;  // inst[4:2] → imm[8:6]
+                    Ok(Instruction::Ld { rd: rd_rs1, rs1: 2, imm: uimm as i64 })
+                }
+                0b100 => {
+                    let bit12 = (w >> 12) & 1;
+                    match (bit12, rd_rs1, rs2) {
+                        (0, rs1, 0) if rs1 != 0 =>
+                            Ok(Instruction::Jalr { rd: 0, rs1: rd_rs1, imm: 0 }), // C.JR
+                        (0, rd, _) if rs2 != 0 =>
+                            Ok(Instruction::Add { rd, rs1: 0, rs2 }),              // C.MV
+                        (1, 0, 0) =>
+                            Ok(Instruction::Ebreak),                               // C.EBREAK
+                        (1, rs1, 0) if rs1 != 0 =>
+                            Ok(Instruction::Jalr { rd: 1, rs1: rd_rs1, imm: 0 }), // C.JALR
+                        (1, rd, rs2) if rd != 0 && rs2 != 0 =>
+                            Ok(Instruction::Add { rd, rs1: rd_rs1, rs2 }),         // C.ADD
+                        _ => Err(anyhow::Error::new(IllegalInstruction(w))),
+                    }
+                }
+                0b110 => {
+                    // C.SWSP: sw rs2, uimm(sp)
+                    let uimm = ((w >> 9) & 0xf) << 2  // inst[12:9]→ imm[5:2]
+                             | ((w >> 7) & 3) << 6;   // inst[8:7] → imm[7:6]
+                    Ok(Instruction::Sw { rs1: 2, rs2, imm: uimm as i64 })
+                }
+                0b111 => {
+                    // C.SDSP (RV64): sd rs2, uimm(sp)
+                    let uimm = ((w >> 10) & 7) << 3   // inst[12:10]→ imm[5:3]
+                             | ((w >> 7) & 7) << 6;   // inst[9:7]  → imm[8:6]
+                    Ok(Instruction::Sd { rs1: 2, rs2, imm: uimm as i64 })
+                }
+                _ => Err(anyhow::Error::new(IllegalInstruction(w))),
+            }
+        }
+
+        _ => unreachable!(), // quad is 2-bit; only 0/1/2 reach here (3 = 32-bit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

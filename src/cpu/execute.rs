@@ -13,8 +13,8 @@ fn sext(val: u64, bit: u32) -> u64 {
 pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     let pc = cpu.pc;
 
-    // Most instructions advance pc by 4. Branches and jumps set pc directly.
-    let mut next_pc = pc.wrapping_add(4);
+    // Most instructions advance pc by inst_size (4 for full, 2 for RVC).
+    let mut next_pc = pc.wrapping_add(cpu.inst_size);
 
     // MPRV (mstatus[17]): loads/stores use MPP-mode translation when set. Priv §3.1.6.3.
     // Instruction fetch is NOT affected by MPRV.
@@ -242,61 +242,61 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::Beq  { rs1, rs2, imm } => {
             if cpu.reg(rs1) == cpu.reg(rs2) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
         Instruction::Bne  { rs1, rs2, imm } => {
             if cpu.reg(rs1) != cpu.reg(rs2) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
         Instruction::Blt  { rs1, rs2, imm } => {
             if (cpu.reg(rs1) as i64) < (cpu.reg(rs2) as i64) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
         Instruction::Bge  { rs1, rs2, imm } => {
             if (cpu.reg(rs1) as i64) >= (cpu.reg(rs2) as i64) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
         Instruction::Bltu { rs1, rs2, imm } => {
             if cpu.reg(rs1) < cpu.reg(rs2) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
         Instruction::Bgeu { rs1, rs2, imm } => {
             if cpu.reg(rs1) >= cpu.reg(rs2) {
                 let t = pc.wrapping_add(imm as u64);
-                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                if t & 0x1 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
                 else { next_pc = t; }
             }
         },
 
         // --- Jumps ---
-        // JAL: rd = pc+4, pc = pc + imm. Spec: Unprivileged §2.5
+        // JAL: rd = pc+inst_size, pc = pc + imm. Spec: Unprivileged §2.5
         Instruction::Jal { rd, imm } => {
             let target = pc.wrapping_add(imm as u64);
-            if target & 0x3 != 0 {
+            if target & 0x1 != 0 {
                 cpu.deliver_trap(0, target); next_pc = cpu.pc;
             } else {
                 cpu.set_reg(rd, next_pc);
                 next_pc = target;
             }
         },
-        // JALR: rd = pc+4, pc = (rs1 + imm) & ~1. Spec: Unprivileged §2.5
+        // JALR: rd = pc+inst_size, pc = (rs1 + imm) & ~1. Spec: Unprivileged §2.5
         Instruction::Jalr { rd, rs1, imm } => {
             let target = cpu.reg(rs1).wrapping_add(imm as u64) & !1;
-            if target & 0x3 != 0 {
+            if target & 0x1 != 0 {
                 cpu.deliver_trap(0, target); next_pc = cpu.pc;
             } else {
                 cpu.set_reg(rd, next_pc);
