@@ -40,7 +40,7 @@ impl Csr {
     pub fn read(&self, addr: u16) -> u64 {
         match addr {
             0x300 => self.mstatus,
-            0x301 => 0x8000_0000_0000_1101, // misa: hardwired RV64IMA
+            0x301 => self.misa,
             0x304 => self.mie,
             0x305 => self.mtvec,
             0x340 => self.mscratch,
@@ -81,9 +81,15 @@ impl Csr {
             0x143 => self.stval    = val,
             0x180 => self.satp     = val,
             // Read-only: silently ignore
-            0xf11 | 0xf12 | 0xf13 | 0xf14 => {}
+            0xf11..=0xf14 => {}
             _ => {}
         }
+    }
+}
+
+impl Default for Csr {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
