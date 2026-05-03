@@ -3,6 +3,7 @@ pub mod execute;
 
 use crate::bus::Bus;
 use anyhow::Result;
+use std::collections::HashMap;
 
 pub struct Tracer {
     pub enabled: bool,
@@ -27,11 +28,38 @@ pub struct Cpu {
     pub pc: u64,
     pub bus: Bus,
     pub tracer: Tracer,
+    /// Sparse CSR file. Most CSRs are zero by default. Reads of a missing CSR
+    /// return 0; writes insert. Only what tests need is supported in Phase 1.
+    /// Spec: Privileged §2 (CSRs).
+    pub csrs: HashMap<u16, u64>,
 }
 
 impl Cpu {
     pub fn new(bus: Bus, entry: u64, trace: bool) -> Self {
-        Self { regs: [0u64; 32], pc: entry, bus, tracer: Tracer::new(trace) }
+        Self {
+            regs: [0u64; 32],
+            pc: entry,
+            bus,
+            tracer: Tracer::new(trace),
+            csrs: HashMap::new(),
+        }
+    }
+
+    /// Read a CSR. Unimplemented CSRs read as zero (sufficient for the
+    /// rv64ui-p-* test environment, which only requires storage semantics).
+    #[inline]
+    pub fn csr_read(&self, addr: u16) -> u64 {
+        // mhartid is hardwired to 0 (single-hart). All others default to 0.
+        *self.csrs.get(&addr).unwrap_or(&0)
+    }
+
+    /// Write a CSR. mhartid (0xf14) and other read-only CSRs ignore writes.
+    #[inline]
+    pub fn csr_write(&mut self, addr: u16, val: u64) {
+        // CSR addresses with bits[11:10] = 11 are read-only — silently ignore.
+        // Spec: Privileged §2.1.
+        if (addr >> 10) & 0x3 == 0x3 { return; }
+        self.csrs.insert(addr, val);
     }
 
     /// Read register. x0 always returns 0.

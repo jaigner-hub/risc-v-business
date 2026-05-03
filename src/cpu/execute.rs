@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crate::cpu::{Cpu, decode::Instruction};
 
 /// Sign-extend a u64 value from bit `n` (0-indexed).
@@ -202,14 +202,88 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::Auipc { rd, imm } => { cpu.set_reg(rd, pc.wrapping_add(imm as u64)); },
 
         // --- System ---
-        Instruction::Fence  => { /* NOP in Phase 1 — no memory-ordering concerns */ },
-        Instruction::Ecall  => return Err(anyhow!("ecall at pc={pc:#x}")),
-        Instruction::Ebreak => return Err(anyhow!("ebreak at pc={pc:#x}")),
+        Instruction::Fence => { /* NOP in Phase 1 — no memory-ordering concerns */ },
+        Instruction::Wfi   => { /* NOP — no interrupts in Phase 1 */ },
+
+        // ECALL: deliver an environment-call-from-M-mode trap.
+        // Spec: Privileged §3.3.1, Table 3.6 — mcause = 11 for env-call from M-mode.
+        // mepc = pc of the ecall, then jump to mtvec (direct mode).
+        Instruction::Ecall => {
+            cpu.csr_write(CSR_MCAUSE, 11);
+            cpu.csr_write(CSR_MEPC, pc);
+            cpu.csr_write(CSR_MTVAL, 0);
+            // mtvec direct mode: bits[1:0] = 00 → pc = base. Vectored mode is rare for
+            // synchronous traps and not used by the test environment.
+            next_pc = cpu.csr_read(CSR_MTVEC) & !0b11;
+        },
+        // EBREAK: also a trap, mcause = 3 (breakpoint).
+        Instruction::Ebreak => {
+            cpu.csr_write(CSR_MCAUSE, 3);
+            cpu.csr_write(CSR_MEPC, pc);
+            cpu.csr_write(CSR_MTVAL, pc);
+            next_pc = cpu.csr_read(CSR_MTVEC) & !0b11;
+        },
+        // MRET: return from a machine-mode trap. pc = mepc.
+        // Spec: Privileged §3.3.2.
+        Instruction::Mret => {
+            next_pc = cpu.csr_read(CSR_MEPC);
+        },
+        // SRET: return from a supervisor-mode trap. Phase 3 will implement properly;
+        // for now treat as MRET-like fallback so tests that touch it don't crash.
+        Instruction::Sret => {
+            next_pc = cpu.csr_read(CSR_SEPC);
+        },
+
+        // --- Zicsr (CSR access) ---
+        // Spec: Unprivileged §9.1. Each CSRR* atomically reads csr into rd, then
+        // writes a new value back. The exact write source/operation differs per
+        // mnemonic. If rd=x0, the read is suppressed for csrrw[i] (no side effects);
+        // for the others, if rs1/uimm is 0, the write is suppressed.
+        Instruction::Csrrw { rd, rs1, csr } => {
+            let new_val = cpu.reg(rs1);
+            let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+            cpu.csr_write(csr, new_val);
+            cpu.set_reg(rd, old);
+        },
+        Instruction::Csrrs { rd, rs1, csr } => {
+            let old = cpu.csr_read(csr);
+            let mask = cpu.reg(rs1);
+            if rs1 != 0 { cpu.csr_write(csr, old | mask); }
+            cpu.set_reg(rd, old);
+        },
+        Instruction::Csrrc { rd, rs1, csr } => {
+            let old = cpu.csr_read(csr);
+            let mask = cpu.reg(rs1);
+            if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
+            cpu.set_reg(rd, old);
+        },
+        Instruction::Csrrwi { rd, uimm, csr } => {
+            let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+            cpu.csr_write(csr, uimm as u64);
+            cpu.set_reg(rd, old);
+        },
+        Instruction::Csrrsi { rd, uimm, csr } => {
+            let old = cpu.csr_read(csr);
+            if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
+            cpu.set_reg(rd, old);
+        },
+        Instruction::Csrrci { rd, uimm, csr } => {
+            let old = cpu.csr_read(csr);
+            if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
+            cpu.set_reg(rd, old);
+        },
     }
 
     cpu.pc = next_pc;
     Ok(())
 }
+
+// CSR addresses used by the Phase 1 trap path. Spec: Privileged §2.2.
+const CSR_SEPC:   u16 = 0x141;
+const CSR_MTVEC:  u16 = 0x305;
+const CSR_MEPC:   u16 = 0x341;
+const CSR_MCAUSE: u16 = 0x342;
+const CSR_MTVAL:  u16 = 0x343;
 
 #[cfg(test)]
 mod tests {

@@ -67,6 +67,18 @@ pub enum Instruction {
     Fence,   // opcode 0x0F — NOP in Phase 1
     Ecall,   // opcode 0x73, imm=0
     Ebreak,  // opcode 0x73, imm=1
+    Mret,    // opcode 0x73, imm=0x302 — return from M-mode trap
+    Sret,    // opcode 0x73, imm=0x102 — return from S-mode trap (Phase 3)
+    Wfi,     // opcode 0x73, imm=0x105 — wait for interrupt (NOP for now)
+    // --- Zicsr extension (RV CSR access) ---
+    // Spec: Unprivileged §9. csr is the 12-bit CSR address (bits[31:20]).
+    // The *I variants use a 5-bit unsigned immediate from rs1 field (zero-extended).
+    Csrrw  { rd: usize, rs1: usize, csr: u16 },
+    Csrrs  { rd: usize, rs1: usize, csr: u16 },
+    Csrrc  { rd: usize, rs1: usize, csr: u16 },
+    Csrrwi { rd: usize, uimm: u32, csr: u16 },
+    Csrrsi { rd: usize, uimm: u32, csr: u16 },
+    Csrrci { rd: usize, uimm: u32, csr: u16 },
 }
 
 /// Sign-extend the high 12 bits of inst (I-type immediate).
@@ -213,10 +225,29 @@ pub fn decode(inst: u32) -> Result<Instruction> {
         0x37 => Ok(Instruction::Lui   { rd, imm: u_imm(inst) }),
         0x17 => Ok(Instruction::Auipc { rd, imm: u_imm(inst) }),
         0x0F => Ok(Instruction::Fence),
-        0x73 => match i_imm(inst) {
-            0 => Ok(Instruction::Ecall),
-            1 => Ok(Instruction::Ebreak),
-            _ => Err(anyhow!("illegal system instruction imm={:#x}", i_imm(inst))),
+        // System / Zicsr: opcode 0x73. Spec: Unprivileged §9 (CSRs), Privileged §3.3 (mret).
+        0x73 => {
+            let csr = ((inst >> 20) & 0xfff) as u16;
+            match funct3 {
+                // funct3=0: PRIV instructions (ecall/ebreak/mret/sret/wfi). Distinguished by full imm.
+                0x0 => match (csr, rs1, rd) {
+                    (0x000, 0, 0) => Ok(Instruction::Ecall),
+                    (0x001, 0, 0) => Ok(Instruction::Ebreak),
+                    (0x302, 0, 0) => Ok(Instruction::Mret),
+                    (0x102, 0, 0) => Ok(Instruction::Sret),
+                    (0x105, 0, 0) => Ok(Instruction::Wfi),
+                    _ => Err(anyhow!(
+                        "illegal system instruction csr={csr:#x} rs1={rs1} rd={rd} inst={inst:#010x}"
+                    )),
+                },
+                0x1 => Ok(Instruction::Csrrw  { rd, rs1, csr }),
+                0x2 => Ok(Instruction::Csrrs  { rd, rs1, csr }),
+                0x3 => Ok(Instruction::Csrrc  { rd, rs1, csr }),
+                0x5 => Ok(Instruction::Csrrwi { rd, uimm: rs1 as u32, csr }),
+                0x6 => Ok(Instruction::Csrrsi { rd, uimm: rs1 as u32, csr }),
+                0x7 => Ok(Instruction::Csrrci { rd, uimm: rs1 as u32, csr }),
+                _ => Err(anyhow!("illegal system funct3={funct3:#x} inst={inst:#010x}")),
+            }
         },
         _ => Err(anyhow!("illegal opcode {opcode:#x} at inst={inst:#010x}")),
     }
