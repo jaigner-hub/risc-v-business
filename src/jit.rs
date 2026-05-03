@@ -962,6 +962,90 @@ impl JitCache {
                     emit_store(&mut ops, rs1, rs2, imm as i64, jit_store64);
                 }
 
+                // ── Conditional branches (end block) ──────────────────────────
+                Instruction::Beq  { rs1, rs2, imm } |
+                Instruction::Bne  { rs1, rs2, imm } |
+                Instruction::Blt  { rs1, rs2, imm } |
+                Instruction::Bge  { rs1, rs2, imm } |
+                Instruction::Bltu { rs1, rs2, imm } |
+                Instruction::Bgeu { rs1, rs2, imm } => {
+                    let taken_pc  = guest_pc.wrapping_add(imm as u64) as i64;
+                    let fall_pc   = next_seq as i64;
+                    let rs1_off   = (rs1 * 8) as i32;
+                    let rs2_off   = (rs2 * 8) as i32;
+                    let taken_lbl = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; cmp rax, QWORD [r15 + rs2_off]
+                    );
+                    match inst {
+                        Instruction::Beq  { .. } => dynasm!(ops ; .arch x64 ; je  =>taken_lbl),
+                        Instruction::Bne  { .. } => dynasm!(ops ; .arch x64 ; jne =>taken_lbl),
+                        Instruction::Blt  { .. } => dynasm!(ops ; .arch x64 ; jl  =>taken_lbl),
+                        Instruction::Bge  { .. } => dynasm!(ops ; .arch x64 ; jge =>taken_lbl),
+                        Instruction::Bltu { .. } => dynasm!(ops ; .arch x64 ; jb  =>taken_lbl),
+                        Instruction::Bgeu { .. } => dynasm!(ops ; .arch x64 ; jae =>taken_lbl),
+                        _ => unreachable!(),
+                    }
+                    // Fall-through path
+                    emit_return(&mut ops, fall_pc as u64);
+                    // Taken path
+                    dynasm!(ops ; .arch x64 ; =>taken_lbl);
+                    emit_return(&mut ops, taken_pc as u64);
+                    break;
+                }
+
+                // ── JAL (end block) ────────────────────────────────────────────
+                Instruction::Jal { rd, imm } => {
+                    let link_pc   = next_seq as i64;
+                    let target_pc = guest_pc.wrapping_add(imm as u64) as i64;
+                    if rd != 0 {
+                        let rd_off = (rd * 8) as i32;
+                        dynasm!(ops
+                            ; .arch x64
+                            ; mov rax, QWORD link_pc
+                            ; mov QWORD [r15 + rd_off], rax
+                        );
+                    }
+                    emit_return(&mut ops, target_pc as u64);
+                    break;
+                }
+
+                // ── JALR (end block) ───────────────────────────────────────────
+                Instruction::Jalr { rd, rs1, imm } => {
+                    let link_pc = next_seq as i64;
+                    let rs1_off = (rs1 * 8) as i32;
+                    let imm32   = imm as i32;
+                    // Read rs1 first, then write rd (handles rd == rs1 correctly).
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, QWORD [r15 + rs1_off]
+                    );
+                    if rd != 0 {
+                        let rd_off = (rd * 8) as i32;
+                        dynasm!(ops
+                            ; .arch x64
+                            ; mov rax, QWORD link_pc
+                            ; mov QWORD [r15 + rd_off], rax
+                        );
+                    }
+                    // Compute target, clear LSB, emit epilogue manually
+                    // (can't use emit_return because target is runtime-computed in rcx)
+                    let mask: i32 = -2;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; add rcx, imm32
+                        ; and rcx, mask     // clear LSB per spec (Unpriv §2.5)
+                        ; add rsp, 8        // undo alignment pad from prologue
+                        ; pop r14
+                        ; pop r15
+                        ; mov rax, rcx
+                        ; ret
+                    );
+                    break;
+                }
+
                 // Everything else: slow path (end block)
                 _ => {
                     emit_slow_path(&mut ops);
@@ -1231,5 +1315,65 @@ mod tests {
         let f = jit.get(ram).unwrap();
         let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
         assert_eq!(next_pc, u64::MAX, "faulting load must return slow-path sentinel");
+    }
+
+    #[test]
+    fn jit_branch_taken() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 99;  // x1 != 0 → BNE taken
+        cpu.bus.store(ram, 4, 0x00009463u64).unwrap(); // BNE x1, x0, +8
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, ram + 8, "BNE should jump to pc+8 when x1 != 0");
+    }
+
+    #[test]
+    fn jit_branch_not_taken() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0;   // x1 == 0 → BNE not taken
+        cpu.bus.store(ram, 4, 0x00009463u64).unwrap(); // BNE x1, x0, +8
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, ram + 4, "BNE should fall through to pc+4 when x1 == 0");
+    }
+
+    #[test]
+    fn jit_jal() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.bus.store(ram, 4, 0x008000EFu64).unwrap(); // JAL x1, +8
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+
+        assert_eq!(next_pc, ram + 8, "JAL target should be pc+8");
+        assert_eq!(cpu.regs[1], ram + 4, "JAL link register should be pc+4");
+    }
+
+    #[test]
+    fn jit_slow_path() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.bus.store(ram, 4, 0xF14020F3u64).unwrap(); // CSRR x1, mhartid
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, u64::MAX, "CSR instruction should trigger slow path");
     }
 }
