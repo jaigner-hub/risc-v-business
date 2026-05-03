@@ -1,5 +1,16 @@
 use anyhow::{anyhow, Result};
 
+#[derive(Debug)]
+pub struct IllegalInstruction(pub u32);
+
+impl std::fmt::Display for IllegalInstruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "illegal instruction: {:#010x}", self.0)
+    }
+}
+
+impl std::error::Error for IllegalInstruction {}
+
 /// All RV64I instructions. Fields are pre-decoded and sign-extended.
 /// Immediates are i64 (signed). Shift amounts are u32 (6-bit for 64-bit ops,
 /// 5-bit for *W ops). Register indices are usize.
@@ -185,7 +196,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
             (0x5, 0x01) => Ok(Instruction::Divu   { rd, rs1, rs2 }),
             (0x6, 0x01) => Ok(Instruction::Rem    { rd, rs1, rs2 }),
             (0x7, 0x01) => Ok(Instruction::Remu   { rd, rs1, rs2 }),
-            _ => Err(anyhow!("illegal R-type funct3={funct3:#x} funct7={funct7:#x}")),
+            _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
         },
         // RV64I W-variants R-type: opcode 0x3B
         0x3B => match (funct3, funct7) {
@@ -200,7 +211,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
             (0x5, 0x01) => Ok(Instruction::Divuw { rd, rs1, rs2 }),
             (0x6, 0x01) => Ok(Instruction::Remw  { rd, rs1, rs2 }),
             (0x7, 0x01) => Ok(Instruction::Remuw { rd, rs1, rs2 }),
-            _ => Err(anyhow!("illegal W R-type funct3={funct3:#x} funct7={funct7:#x}")),
+            _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
         },
         // I-type arithmetic: opcode 0x13
         0x13 => match funct3 {
@@ -308,7 +319,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 (0x18, false) => Ok(Instruction::AmominuW { rd, rs1, rs2 }),
                 (0x1C, true)  => Ok(Instruction::AmomaxuD { rd, rs1, rs2 }),
                 (0x1C, false) => Ok(Instruction::AmomaxuW { rd, rs1, rs2 }),
-                _ => Err(anyhow!("illegal AMO funct5={funct5:#x} funct3={funct3:#x}")),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
         0x0F => Ok(Instruction::Fence),
@@ -323,9 +334,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                     (0x302, 0, 0) => Ok(Instruction::Mret),
                     (0x102, 0, 0) => Ok(Instruction::Sret),
                     (0x105, 0, 0) => Ok(Instruction::Wfi),
-                    _ => Err(anyhow!(
-                        "illegal system instruction csr={csr:#x} rs1={rs1} rd={rd} inst={inst:#010x}"
-                    )),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
                 },
                 0x1 => Ok(Instruction::Csrrw  { rd, rs1, csr }),
                 0x2 => Ok(Instruction::Csrrs  { rd, rs1, csr }),
@@ -333,10 +342,10 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x5 => Ok(Instruction::Csrrwi { rd, uimm: rs1 as u32, csr }),
                 0x6 => Ok(Instruction::Csrrsi { rd, uimm: rs1 as u32, csr }),
                 0x7 => Ok(Instruction::Csrrci { rd, uimm: rs1 as u32, csr }),
-                _ => Err(anyhow!("illegal system funct3={funct3:#x} inst={inst:#010x}")),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
-        _ => Err(anyhow!("illegal opcode {opcode:#x} at inst={inst:#010x}")),
+        _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
     }
 }
 
@@ -437,5 +446,14 @@ mod tests {
     #[test] fn decode_amoaddd() {
         let inst = decode(0x0020B1AF).unwrap();
         assert_eq!(inst, Instruction::AmoaddD { rd: 3, rs1: 1, rs2: 2 });
+    }
+
+    #[test]
+    fn illegal_instruction_carries_raw_bits() {
+        // 0xDEAD_BEFF has opcode 0x7F which is not a valid RISC-V opcode
+        let err = decode(0xDEADBEFF).unwrap_err();
+        let ill = err.downcast_ref::<IllegalInstruction>()
+            .expect("expected IllegalInstruction error");
+        assert_eq!(ill.0, 0xDEADBEFF);
     }
 }
