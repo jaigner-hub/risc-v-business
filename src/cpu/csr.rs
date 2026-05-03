@@ -25,7 +25,8 @@ impl Csr {
     pub fn new() -> Self {
         Self {
             mstatus:  0,
-            misa:     0x8000_0000_0000_1101,
+            // RV64AIMS: A(0) I(8) M(12) S(18); MXLEN=64 in bits[63:62]
+            misa:     0x8000_0000_0004_1101,
             mie:      0,
             mtvec:    0,
             mscratch: 0,
@@ -173,9 +174,9 @@ mod tests {
     #[test]
     fn misa_hardwired() {
         let mut csr = Csr::new();
-        assert_eq!(csr.read(0x301), 0x8000_0000_0000_1101);
+        assert_eq!(csr.read(0x301), 0x8000_0000_0004_1101);
         csr.write(0x301, 0);
-        assert_eq!(csr.read(0x301), 0x8000_0000_0000_1101); // write ignored
+        assert_eq!(csr.read(0x301), 0x8000_0000_0004_1101); // write ignored
     }
 
     #[test]
