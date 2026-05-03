@@ -40,8 +40,9 @@ impl Bus {
     }
 
     fn offset(&self, addr: u64, width: usize) -> Result<usize> {
-        let end = addr.wrapping_add(width as u64);
-        let ram_end = self.ram_base.wrapping_add(self.ram.len() as u64);
+        let end = addr.checked_add(width as u64)
+            .ok_or_else(|| anyhow!("bus fault: addr={addr:#x} width={width}"))?;
+        let ram_end = self.ram_base + self.ram.len() as u64;
         if addr < self.ram_base || end > ram_end {
             return Err(anyhow!("bus fault: addr={addr:#x} width={width}"));
         }
