@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::cpu::{Cpu, PrivMode, decode::Instruction};
+use crate::cpu::mmu::AccessType;
 
 /// Sign-extend a u64 value from bit `n` (0-indexed).
 /// Used for *W variants: sext(val, 31) sign-extends from bit 31.
@@ -114,52 +115,118 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
 
         // --- Loads ---
-        // All sign-extend except LBU/LHU/LWU. Spec: Unprivileged §2.6
+        // All addresses go through the MMU. Page faults deliver a trap and skip set_reg.
         Instruction::Lb  { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            let v = sext(cpu.bus.load(addr, 1)?, 7);
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 1) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, sext(v, 7)),
+                }
+            }
         },
         Instruction::Lh  { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            let v = sext(cpu.bus.load(addr, 2)?, 15);
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 2) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, sext(v, 15)),
+                }
+            }
         },
         Instruction::Lw  { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            let v = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 4) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, sext(v, 31)),
+                }
+            }
         },
         Instruction::Ld  { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            let v = cpu.bus.load(addr, 8)?;
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 8) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, v),
+                }
+            }
         },
         Instruction::Lbu { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            cpu.set_reg(rd, cpu.bus.load(addr, 1)?);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 1) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, v),
+                }
+            }
         },
         Instruction::Lhu { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            cpu.set_reg(rd, cpu.bus.load(addr, 2)?);
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 2) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, v),
+                }
+            }
         },
         Instruction::Lwu { rd, rs1, imm } => {
-            let addr = cpu.reg(rs1).wrapping_add(imm as u64);
-            cpu.set_reg(rd, cpu.bus.load(addr, 4)?); // zero-extended (load already gives u64)
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 4) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.set_reg(rd, v),
+                }
+            }
         },
 
         // --- Stores ---
         Instruction::Sb { rs1, rs2, imm } => {
-            cpu.bus.store(cpu.reg(rs1).wrapping_add(imm as u64), 1, cpu.reg(rs2))?;
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 1, cpu.reg(rs2)) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
         },
         Instruction::Sh { rs1, rs2, imm } => {
-            cpu.bus.store(cpu.reg(rs1).wrapping_add(imm as u64), 2, cpu.reg(rs2))?;
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 2, cpu.reg(rs2)) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
         },
         Instruction::Sw { rs1, rs2, imm } => {
-            cpu.bus.store(cpu.reg(rs1).wrapping_add(imm as u64), 4, cpu.reg(rs2))?;
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 4, cpu.reg(rs2)) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
         },
         Instruction::Sd { rs1, rs2, imm } => {
-            cpu.bus.store(cpu.reg(rs1).wrapping_add(imm as u64), 8, cpu.reg(rs2))?;
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 8, cpu.reg(rs2)) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
         },
 
         // --- Branches ---
@@ -409,156 +476,224 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // --- A extension: atomics ---
         // Spec: Unprivileged §8. Single-hart: aq/rl ordering is trivially satisfied.
         Instruction::LrD { rd, rs1 } => {
-            let addr = cpu.reg(rs1);
-            let v = cpu.bus.load(addr, 8)?;
-            cpu.reservation = Some(addr);
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 8) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => { cpu.set_reg(rd, v); cpu.reservation = Some(pa); }
+                }
+            }
         },
         Instruction::LrW { rd, rs1 } => {
-            let addr = cpu.reg(rs1);
-            let v = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.reservation = Some(addr);
-            cpu.set_reg(rd, v);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 4) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => { cpu.set_reg(rd, sext(v, 31)); cpu.reservation = Some(pa); }
+                }
+            }
         },
         Instruction::ScD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            if cpu.reservation == Some(addr) {
-                cpu.bus.store(addr, 8, cpu.reg(rs2))?;
-                cpu.set_reg(rd, 0);
-            } else {
-                cpu.set_reg(rd, 1);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    if cpu.reservation == Some(pa) {
+                        cpu.bus.store(pa, 8, cpu.reg(rs2)).ok();
+                        cpu.set_reg(rd, 0);
+                    } else {
+                        cpu.set_reg(rd, 1);
+                    }
+                    cpu.reservation = None;
+                }
             }
-            cpu.reservation = None;
         },
         Instruction::ScW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            if cpu.reservation == Some(addr) {
-                cpu.bus.store(addr, 4, cpu.reg(rs2))?;
-                cpu.set_reg(rd, 0);
-            } else {
-                cpu.set_reg(rd, 1);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    if cpu.reservation == Some(pa) {
+                        cpu.bus.store(pa, 4, cpu.reg(rs2)).ok();
+                        cpu.set_reg(rd, 0);
+                    } else {
+                        cpu.set_reg(rd, 1);
+                    }
+                    cpu.reservation = None;
+                }
             }
-            cpu.reservation = None;
         },
         Instruction::AmoswapD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            cpu.bus.store(addr, 8, cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoswapW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoaddD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            cpu.bus.store(addr, 8, old.wrapping_add(cpu.reg(rs2)))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old.wrapping_add(cpu.reg(rs2))).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoaddW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, old.wrapping_add(cpu.reg(rs2)))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old.wrapping_add(cpu.reg(rs2))).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoxorD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            cpu.bus.store(addr, 8, old ^ cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old ^ cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoxorW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, old ^ cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old ^ cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoandD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            cpu.bus.store(addr, 8, old & cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old & cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoandW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, old & cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old & cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoorD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            cpu.bus.store(addr, 8, old | cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old | cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmoorW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, old | cpu.reg(rs2))?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old | cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
+            }
         },
         Instruction::AmominD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            let new = if (old as i64) < (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
-            cpu.bus.store(addr, 8, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = cpu.bus.load(pa, 8).unwrap_or(0);
+                    let new = if (old as i64) < (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
+                    cpu.bus.store(pa, 8, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmominW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let rs2v = cpu.reg(rs2);
-            let new = if (old as i32) < (rs2v as i32) { old } else { sext(rs2v, 31) };
-            cpu.bus.store(addr, 4, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
+                    let rs2v = cpu.reg(rs2);
+                    let new = if (old as i32) < (rs2v as i32) { old } else { sext(rs2v, 31) };
+                    cpu.bus.store(pa, 4, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmomaxD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            let new = if (old as i64) > (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
-            cpu.bus.store(addr, 8, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = cpu.bus.load(pa, 8).unwrap_or(0);
+                    let new = if (old as i64) > (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
+                    cpu.bus.store(pa, 8, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmomaxW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let rs2v = cpu.reg(rs2);
-            let new = if (old as i32) > (rs2v as i32) { old } else { sext(rs2v, 31) };
-            cpu.bus.store(addr, 4, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
+                    let rs2v = cpu.reg(rs2);
+                    let new = if (old as i32) > (rs2v as i32) { old } else { sext(rs2v, 31) };
+                    cpu.bus.store(pa, 4, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmominuD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            let new = old.min(cpu.reg(rs2));
-            cpu.bus.store(addr, 8, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = cpu.bus.load(pa, 8).unwrap_or(0);
+                    let new = old.min(cpu.reg(rs2));
+                    cpu.bus.store(pa, 8, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmominuW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let rs2v = cpu.reg(rs2) as u32;
-            let new = if (old as u32) < rs2v { old } else { rs2v as u64 };
-            cpu.bus.store(addr, 4, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
+                    let rs2v = cpu.reg(rs2) as u32;
+                    let new = if (old as u32) < rs2v { old } else { rs2v as u64 };
+                    cpu.bus.store(pa, 4, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmomaxuD { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = cpu.bus.load(addr, 8)?;
-            let new = old.max(cpu.reg(rs2));
-            cpu.bus.store(addr, 8, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = cpu.bus.load(pa, 8).unwrap_or(0);
+                    let new = old.max(cpu.reg(rs2));
+                    cpu.bus.store(pa, 8, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
         Instruction::AmomaxuW { rd, rs1, rs2 } => {
-            let addr = cpu.reg(rs1);
-            let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let rs2v = cpu.reg(rs2) as u32;
-            let new = if (old as u32) > rs2v { old } else { rs2v as u64 };
-            cpu.bus.store(addr, 4, new)?;
-            cpu.set_reg(rd, old);
+            let va = cpu.reg(rs1);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => {
+                    let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
+                    let rs2v = cpu.reg(rs2) as u32;
+                    let new = if (old as u32) > rs2v { old } else { rs2v as u64 };
+                    cpu.bus.store(pa, 4, new).ok();
+                    cpu.set_reg(rd, old);
+                }
+            }
         },
     }
 
