@@ -209,6 +209,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // Spec: Privileged §3.3.1, Table 3.6 — mcause = 11 for env-call from M-mode.
         // mepc = pc of the ecall, then jump to mtvec (direct mode).
         Instruction::Ecall => {
+            cpu.csr.trap_entry();
             cpu.csr_write(CSR_MCAUSE, 11);
             cpu.csr_write(CSR_MEPC, pc);
             cpu.csr_write(CSR_MTVAL, 0);
@@ -218,15 +219,17 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         // EBREAK: also a trap, mcause = 3 (breakpoint).
         Instruction::Ebreak => {
+            cpu.csr.trap_entry();
             cpu.csr_write(CSR_MCAUSE, 3);
             cpu.csr_write(CSR_MEPC, pc);
             cpu.csr_write(CSR_MTVAL, pc);
             next_pc = cpu.csr_read(CSR_MTVEC) & !0b11;
         },
         // MRET: return from a machine-mode trap. pc = mepc.
-        // Spec: Privileged §3.3.2.
+        // Spec: Privileged §3.3.2. Restores MIE←MPIE, MPIE←1 via mret() helper.
         Instruction::Mret => {
-            next_pc = cpu.csr_read(CSR_MEPC);
+            cpu.csr.mret();
+            next_pc = cpu.csr.mepc;
         },
         // SRET: return from a supervisor-mode trap. Phase 3 will implement properly;
         // for now treat as MRET-like fallback so tests that touch it don't crash.

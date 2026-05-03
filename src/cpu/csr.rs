@@ -63,6 +63,24 @@ impl Csr {
         }
     }
 
+    pub fn mie_bit(&self) -> u64 {
+        (self.mstatus >> 3) & 1
+    }
+
+    pub fn trap_entry(&mut self) {
+        let mie = self.mie_bit();
+        self.mstatus = (self.mstatus & !0x1888u64) // clear MIE[3], MPIE[7], MPP[12:11]
+            | (mie << 7)                           // MPIE ← MIE
+            | (3u64 << 11);                        // MPP ← M-mode
+    }
+
+    pub fn mret(&mut self) {
+        let mpie = (self.mstatus >> 7) & 1;
+        self.mstatus = (self.mstatus & !0x1888u64) // clear MIE[3], MPIE[7], MPP[12:11]
+            | (mpie << 3)                          // MIE ← MPIE
+            | (1u64 << 7);                         // MPIE ← 1
+    }
+
     pub fn write(&mut self, addr: u16, val: u64) {
         match addr {
             0x300 => self.mstatus  = val,
@@ -124,5 +142,22 @@ mod tests {
     fn unknown_csr_reads_zero() {
         let csr = Csr::new();
         assert_eq!(csr.read(0x999), 0);
+    }
+
+    #[test]
+    fn mstatus_mie_mpie_mpp() {
+        let mut csr = Csr::new();
+        // Set MIE=1 (bit 3)
+        csr.mstatus = 0b1000; // MIE=1
+        assert_eq!(csr.mie_bit(), 1);
+        // Simulate trap entry: MPIE←MIE, MIE←0, MPP←3
+        csr.trap_entry();
+        assert_eq!(csr.mie_bit(), 0);           // MIE cleared
+        assert_eq!((csr.mstatus >> 7) & 1, 1);  // MPIE = previous MIE
+        assert_eq!((csr.mstatus >> 11) & 3, 3); // MPP = M-mode
+        // Simulate MRET: MIE←MPIE, MPIE←1
+        csr.mret();
+        assert_eq!(csr.mie_bit(), 1);           // MIE restored
+        assert_eq!((csr.mstatus >> 7) & 1, 1);  // MPIE set to 1
     }
 }

@@ -69,6 +69,14 @@ impl Cpu {
         if n != 0 { self.regs[n] = val; }
     }
 
+    pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
+        self.csr.trap_entry();
+        self.csr.mepc   = self.pc;
+        self.csr.mcause = cause;
+        self.csr.mtval  = tval;
+        self.pc = self.csr.mtvec & !0b11;
+    }
+
     /// Fetch, decode, execute one instruction. Advances pc.
     /// Fully wired up in Task 8 once decode() and execute() exist.
     pub fn step(&mut self) -> Result<()> {
