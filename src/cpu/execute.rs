@@ -272,6 +272,104 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
             cpu.set_reg(rd, old);
         },
+        // --- M extension: integer multiply/divide ---
+        // Spec: Unprivileged §7
+        Instruction::Mul { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i64 as i128;
+            let b = cpu.reg(rs2) as i64 as i128;
+            cpu.set_reg(rd, (a * b) as u64);
+        },
+        Instruction::Mulh { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i64 as i128;
+            let b = cpu.reg(rs2) as i64 as i128;
+            cpu.set_reg(rd, ((a * b) >> 64) as u64);
+        },
+        Instruction::Mulhsu { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i64 as i128;
+            let b = cpu.reg(rs2) as u128 as i128;
+            cpu.set_reg(rd, ((a * b) >> 64) as u64);
+        },
+        Instruction::Mulhu { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as u128;
+            let b = cpu.reg(rs2) as u128;
+            cpu.set_reg(rd, ((a * b) >> 64) as u64);
+        },
+        Instruction::Div { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i64;
+            let b = cpu.reg(rs2) as i64;
+            let v = if b == 0 {
+                -1i64 as u64
+            } else if a == i64::MIN && b == -1 {
+                i64::MIN as u64
+            } else {
+                (a / b) as u64
+            };
+            cpu.set_reg(rd, v);
+        },
+        Instruction::Divu { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1);
+            let b = cpu.reg(rs2);
+            cpu.set_reg(rd, if b == 0 { u64::MAX } else { a / b });
+        },
+        Instruction::Rem { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i64;
+            let b = cpu.reg(rs2) as i64;
+            let v = if b == 0 {
+                a as u64
+            } else if a == i64::MIN && b == -1 {
+                0
+            } else {
+                (a % b) as u64
+            };
+            cpu.set_reg(rd, v);
+        },
+        Instruction::Remu { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1);
+            let b = cpu.reg(rs2);
+            cpu.set_reg(rd, if b == 0 { a } else { a % b });
+        },
+        // M extension W-variants: operate on lower 32 bits, sign-extend result from bit 31
+        Instruction::Mulw { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i32;
+            let b = cpu.reg(rs2) as i32;
+            cpu.set_reg(rd, sext(a.wrapping_mul(b) as u64, 31));
+        },
+        Instruction::Divw { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i32;
+            let b = cpu.reg(rs2) as i32;
+            let v = if b == 0 {
+                -1i64 as u64
+            } else if a == i32::MIN && b == -1 {
+                sext(i32::MIN as u64, 31)
+            } else {
+                sext((a / b) as u64, 31)
+            };
+            cpu.set_reg(rd, v);
+        },
+        Instruction::Divuw { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as u32;
+            let b = cpu.reg(rs2) as u32;
+            let v = if b == 0 { u64::MAX } else { sext((a / b) as u64, 31) };
+            cpu.set_reg(rd, v);
+        },
+        Instruction::Remw { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as i32;
+            let b = cpu.reg(rs2) as i32;
+            let v = if b == 0 {
+                sext(a as u64, 31)
+            } else if a == i32::MIN && b == -1 {
+                0
+            } else {
+                sext((a % b) as u64, 31)
+            };
+            cpu.set_reg(rd, v);
+        },
+        Instruction::Remuw { rd, rs1, rs2 } => {
+            let a = cpu.reg(rs1) as u32;
+            let b = cpu.reg(rs2) as u32;
+            let v = if b == 0 { sext(a as u64, 31) } else { sext((a % b) as u64, 31) };
+            cpu.set_reg(rd, v);
+        },
     }
 
     cpu.pc = next_pc;
@@ -339,5 +437,63 @@ mod tests {
         c.pc = 0x8000_0000;
         execute(&mut c, Instruction::Lui { rd: 1, imm: 0x12345000 }).unwrap();
         assert_eq!(c.reg(1), 0x12345000);
+    }
+
+    #[test] fn mul_lower64() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, (-1i64) as u64);  // 0xFFFF...FFFF
+        c.set_reg(2, 2u64);
+        execute(&mut c, Instruction::Mul { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), (-2i64) as u64); // lower 64 of -1*2 = -2
+    }
+
+    #[test] fn mulh_upper64() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, i64::MIN as u64);    // -2^63
+        c.set_reg(2, (-1i64) as u64);     // -1
+        execute(&mut c, Instruction::Mulh { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        // (-2^63) * (-1) = 2^63; upper 64 bits of 2^63 as i128 = 0
+        assert_eq!(c.reg(3), 0);
+    }
+
+    #[test] fn div_signed_by_zero() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, 7u64);
+        c.set_reg(2, 0u64);
+        execute(&mut c, Instruction::Div { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), (-1i64) as u64); // quotient = -1 on div-by-zero
+    }
+
+    #[test] fn div_signed_overflow() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, i64::MIN as u64);    // -2^63
+        c.set_reg(2, (-1i64) as u64);     // -1
+        execute(&mut c, Instruction::Div { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), i64::MIN as u64); // quotient = -2^63 on overflow
+    }
+
+    #[test] fn divu_by_zero() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, 42u64);
+        c.set_reg(2, 0u64);
+        execute(&mut c, Instruction::Divu { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), u64::MAX);
+    }
+
+    #[test] fn rem_signed_by_zero() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, 7u64);
+        c.set_reg(2, 0u64);
+        execute(&mut c, Instruction::Rem { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), 7u64); // remainder = dividend on div-by-zero
+    }
+
+    #[test] fn mulw_sign_extends() {
+        let mut c = cpu_with_ram(64);
+        c.set_reg(1, 0x0000_0000_8000_0001u64);
+        c.set_reg(2, 0x0000_0000_0000_0002u64);
+        execute(&mut c, Instruction::Mulw { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        // lower 32: 0x8000_0001 * 2 = 0x1_0000_0002; truncated to 32 bits = 0x0000_0002; sign-extend = 2
+        assert_eq!(c.reg(3), 2u64);
     }
 }
