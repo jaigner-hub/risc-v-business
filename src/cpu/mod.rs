@@ -51,7 +51,29 @@ impl Cpu {
     /// Fetch, decode, execute one instruction. Advances pc.
     /// Fully wired up in Task 8 once decode() and execute() exist.
     pub fn step(&mut self) -> Result<()> {
-        anyhow::bail!("step() not yet implemented — wired in Task 8")
+        use decode::decode;
+        use execute::execute;
+
+        let raw = self.bus.load(self.pc, 4)? as u32;
+        let inst = decode(raw)?;
+
+        if self.tracer.enabled {
+            let before = self.regs;
+            let pc = self.pc;
+            execute(self, inst)?;
+            let changes: Vec<(usize, u64, u64)> = (1..32)
+                .filter(|&i| before[i] != self.regs[i])
+                .map(|i| (i, before[i], self.regs[i]))
+                .collect();
+            let inst2 = decode(raw).unwrap();
+            let mnemonic = format!("{inst2:?}");
+            let short = mnemonic.split(' ').next().unwrap_or(&mnemonic);
+            self.tracer.trace_step(pc, raw, short, "", &changes);
+        } else {
+            execute(self, inst)?;
+        }
+
+        Ok(())
     }
 }
 
