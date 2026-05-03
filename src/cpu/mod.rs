@@ -81,7 +81,7 @@ impl Cpu {
     /// Fetch faults deliver mcause=1; decode failures deliver mcause=2.
     /// Execute errors still propagate as Err.
     pub fn step(&mut self) -> Result<()> {
-        use decode::{decode, IllegalInstruction};
+        use decode::decode;
         use execute::execute;
 
         let pc = self.pc;
@@ -95,16 +95,11 @@ impl Cpu {
             }
         };
 
-        // Decode — IllegalInstruction → mcause=2, mtval=raw bits
+        // Decode — any error is an illegal instruction; raw bits go into mtval
         let inst = match decode(raw) {
             Ok(i) => i,
-            Err(e) => {
-                let tval = if e.downcast_ref::<IllegalInstruction>().is_some() {
-                    raw as u64
-                } else {
-                    0
-                };
-                self.deliver_trap(2, tval);
+            Err(_) => {
+                self.deliver_trap(2, raw as u64);
                 return Ok(());
             }
         };
