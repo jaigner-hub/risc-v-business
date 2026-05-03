@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use dynasmrt::{dynasm, DynasmApi, ExecutableBuffer, x64::Assembler};
+use dynasmrt::ExecutableBuffer;
 use crate::cpu::Cpu;
 
 /// Signature of every compiled basic block.
@@ -39,12 +39,7 @@ impl JitCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bus::Bus, cpu::Cpu};
-
-    #[allow(dead_code)]
-    fn make_cpu() -> Cpu {
-        Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false)
-    }
+    use dynasmrt::{dynasm, DynasmApi, x64::Assembler};
 
     #[test]
     fn jit_cache_new_is_empty() {
