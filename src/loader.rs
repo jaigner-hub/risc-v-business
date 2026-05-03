@@ -1,1 +1,46 @@
-pub struct LoadedElf;
+use anyhow::{anyhow, Context, Result};
+use goblin::elf::{Elf, program_header::PT_LOAD};
+use crate::bus::Bus;
+
+pub struct LoadedElf {
+    pub bus:         Bus,
+    pub entry:       u64,
+    pub tohost_addr: Option<u64>,
+}
+
+const RAM_BASE: u64 = 0x8000_0000;
+const RAM_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
+
+/// Load an ELF64 binary: copy PT_LOAD segments into RAM, return entry point
+/// and (if present) the address of the `tohost` symbol used by riscv-tests.
+pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
+    let elf = Elf::parse(bytes).context("ELF parse failed")?;
+    if !elf.is_64 {
+        return Err(anyhow!("expected ELF64, got ELF32"));
+    }
+
+    let mut bus = Bus::new(RAM_SIZE, RAM_BASE);
+
+    for ph in &elf.program_headers {
+        if ph.p_type != PT_LOAD { continue; }
+        let file_start = ph.p_offset as usize;
+        let file_end   = file_start + ph.p_filesz as usize;
+        let mem_addr   = ph.p_paddr;
+
+        if mem_addr < RAM_BASE {
+            return Err(anyhow!("PT_LOAD segment at {mem_addr:#x} is below RAM base {RAM_BASE:#x}"));
+        }
+
+        let segment = bytes.get(file_start..file_end)
+            .ok_or_else(|| anyhow!("PT_LOAD segment out of file bounds"))?;
+
+        let off = (mem_addr - RAM_BASE) as usize;
+        bus.ram_mut()[off..off + segment.len()].copy_from_slice(segment);
+    }
+
+    let tohost_addr = elf.syms.iter()
+        .find(|s| elf.strtab.get_at(s.st_name) == Some("tohost"))
+        .map(|s| s.st_value);
+
+    Ok(LoadedElf { bus, entry: elf.entry, tohost_addr })
+}
