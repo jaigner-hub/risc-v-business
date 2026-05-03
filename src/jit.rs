@@ -750,7 +750,7 @@ impl JitCache {
                         ; mov rax, QWORD -1i64       // div-by-zero: -1 (sign-extended)
                         ; jmp =>done
                         ;not_zero:
-                        ; mov rdx, QWORD i64::MIN as i64
+                        ; mov rdx, QWORD i32::MIN as i64
                         ; cmp rax, rdx
                         ; jne >no_overflow
                         ; cmp rcx, -1i32
@@ -799,7 +799,7 @@ impl JitCache {
                         ; movsxd rax, eax      // div-by-zero: remainder = dividend sign-extended
                         ; jmp =>done
                         ;not_zero:
-                        ; mov rdx, QWORD i64::MIN as i64
+                        ; mov rdx, QWORD i32::MIN as i64
                         ; cmp rax, rdx
                         ; jne >no_overflow
                         ; cmp rcx, -1i32
