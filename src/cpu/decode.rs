@@ -16,6 +16,22 @@ pub enum Instruction {
     Sra  { rd: usize, rs1: usize, rs2: usize },
     Or   { rd: usize, rs1: usize, rs2: usize },
     And  { rd: usize, rs1: usize, rs2: usize },
+    // --- M extension (opcode 0x33 / 0x3B, funct7=0x01) ---
+    // Spec: Unprivileged §7
+    Mul    { rd: usize, rs1: usize, rs2: usize },
+    Mulh   { rd: usize, rs1: usize, rs2: usize },
+    Mulhsu { rd: usize, rs1: usize, rs2: usize },
+    Mulhu  { rd: usize, rs1: usize, rs2: usize },
+    Div    { rd: usize, rs1: usize, rs2: usize },
+    Divu   { rd: usize, rs1: usize, rs2: usize },
+    Rem    { rd: usize, rs1: usize, rs2: usize },
+    Remu   { rd: usize, rs1: usize, rs2: usize },
+    // W-variants (opcode 0x3B, funct7=0x01)
+    Mulw   { rd: usize, rs1: usize, rs2: usize },
+    Divw   { rd: usize, rs1: usize, rs2: usize },
+    Divuw  { rd: usize, rs1: usize, rs2: usize },
+    Remw   { rd: usize, rs1: usize, rs2: usize },
+    Remuw  { rd: usize, rs1: usize, rs2: usize },
     // --- RV64I W-variants R-type (opcode 0x3B) ---
     Addw { rd: usize, rs1: usize, rs2: usize },
     Subw { rd: usize, rs1: usize, rs2: usize },
@@ -136,6 +152,15 @@ pub fn decode(inst: u32) -> Result<Instruction> {
             (0x5, 0x20) => Ok(Instruction::Sra  { rd, rs1, rs2 }),
             (0x6, 0x00) => Ok(Instruction::Or   { rd, rs1, rs2 }),
             (0x7, 0x00) => Ok(Instruction::And  { rd, rs1, rs2 }),
+            // M extension (funct7=0x01)
+            (0x0, 0x01) => Ok(Instruction::Mul    { rd, rs1, rs2 }),
+            (0x1, 0x01) => Ok(Instruction::Mulh   { rd, rs1, rs2 }),
+            (0x2, 0x01) => Ok(Instruction::Mulhsu { rd, rs1, rs2 }),
+            (0x3, 0x01) => Ok(Instruction::Mulhu  { rd, rs1, rs2 }),
+            (0x4, 0x01) => Ok(Instruction::Div    { rd, rs1, rs2 }),
+            (0x5, 0x01) => Ok(Instruction::Divu   { rd, rs1, rs2 }),
+            (0x6, 0x01) => Ok(Instruction::Rem    { rd, rs1, rs2 }),
+            (0x7, 0x01) => Ok(Instruction::Remu   { rd, rs1, rs2 }),
             _ => Err(anyhow!("illegal R-type funct3={funct3:#x} funct7={funct7:#x}")),
         },
         // RV64I W-variants R-type: opcode 0x3B
@@ -145,6 +170,12 @@ pub fn decode(inst: u32) -> Result<Instruction> {
             (0x1, 0x00) => Ok(Instruction::Sllw { rd, rs1, rs2 }),
             (0x5, 0x00) => Ok(Instruction::Srlw { rd, rs1, rs2 }),
             (0x5, 0x20) => Ok(Instruction::Sraw { rd, rs1, rs2 }),
+            // M extension W-variants (funct7=0x01)
+            (0x0, 0x01) => Ok(Instruction::Mulw  { rd, rs1, rs2 }),
+            (0x4, 0x01) => Ok(Instruction::Divw  { rd, rs1, rs2 }),
+            (0x5, 0x01) => Ok(Instruction::Divuw { rd, rs1, rs2 }),
+            (0x6, 0x01) => Ok(Instruction::Remw  { rd, rs1, rs2 }),
+            (0x7, 0x01) => Ok(Instruction::Remuw { rd, rs1, rs2 }),
             _ => Err(anyhow!("illegal W R-type funct3={funct3:#x} funct7={funct7:#x}")),
         },
         // I-type arithmetic: opcode 0x13
@@ -311,5 +342,23 @@ mod tests {
     #[test] fn decode_addiw() {
         let inst = decode(0xfff0809b).unwrap();
         assert_eq!(inst, Instruction::Addiw { rd: 1, rs1: 1, imm: -1 });
+    }
+
+    // MUL x3, x1, x2  →  0x0220_81B3
+    #[test] fn decode_mul() {
+        let inst = decode(0x022081B3).unwrap();
+        assert_eq!(inst, Instruction::Mul { rd: 3, rs1: 1, rs2: 2 });
+    }
+
+    // MULW x3, x1, x2  →  0x0220_81BB
+    #[test] fn decode_mulw() {
+        let inst = decode(0x022081BB).unwrap();
+        assert_eq!(inst, Instruction::Mulw { rd: 3, rs1: 1, rs2: 2 });
+    }
+
+    // DIV x3, x1, x2  →  0x0220_C1B3
+    #[test] fn decode_div() {
+        let inst = decode(0x0220C1B3).unwrap();
+        assert_eq!(inst, Instruction::Div { rd: 3, rs1: 1, rs2: 2 });
     }
 }
