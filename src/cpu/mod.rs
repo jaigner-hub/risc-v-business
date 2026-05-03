@@ -60,15 +60,14 @@ impl Cpu {
         if self.tracer.enabled {
             let before = self.regs;
             let pc = self.pc;
+            let mnemonic = format!("{inst:?}");
+            let short = mnemonic.split(' ').next().unwrap_or(&mnemonic).to_owned();
             execute(self, inst)?;
             let changes: Vec<(usize, u64, u64)> = (1..32)
                 .filter(|&i| before[i] != self.regs[i])
                 .map(|i| (i, before[i], self.regs[i]))
                 .collect();
-            let inst2 = decode(raw).unwrap();
-            let mnemonic = format!("{inst2:?}");
-            let short = mnemonic.split(' ').next().unwrap_or(&mnemonic);
-            self.tracer.trace_step(pc, raw, short, "", &changes);
+            self.tracer.trace_step(pc, raw, &short, "", &changes);
         } else {
             execute(self, inst)?;
         }
