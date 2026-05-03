@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 #[derive(Debug)]
 pub struct IllegalInstruction(pub u32);
@@ -246,7 +246,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                     Ok(Instruction::Sraiw { rd, rs1, shamt })
                 }
             },
-            _ => Err(anyhow!("illegal IW funct3={funct3:#x}")),
+            _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
         },
         // Loads: opcode 0x03
         0x03 => {
@@ -259,7 +259,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x4 => Ok(Instruction::Lbu { rd, rs1, imm }),
                 0x5 => Ok(Instruction::Lhu { rd, rs1, imm }),
                 0x6 => Ok(Instruction::Lwu { rd, rs1, imm }),
-                _ => Err(anyhow!("illegal load funct3={funct3:#x}")),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
         // Stores: opcode 0x23
@@ -270,7 +270,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x1 => Ok(Instruction::Sh { rs1, rs2, imm }),
                 0x2 => Ok(Instruction::Sw { rs1, rs2, imm }),
                 0x3 => Ok(Instruction::Sd { rs1, rs2, imm }),
-                _ => Err(anyhow!("illegal store funct3={funct3:#x}")),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
         // Branches: opcode 0x63
@@ -283,7 +283,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x5 => Ok(Instruction::Bge  { rs1, rs2, imm }),
                 0x6 => Ok(Instruction::Bltu { rs1, rs2, imm }),
                 0x7 => Ok(Instruction::Bgeu { rs1, rs2, imm }),
-                _ => Err(anyhow!("illegal branch funct3={funct3:#x}")),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
         0x6F => Ok(Instruction::Jal  { rd, imm: j_imm(inst) }),
