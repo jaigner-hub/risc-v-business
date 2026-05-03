@@ -27,7 +27,7 @@ impl Bus {
     }
 
     /// Load `width` bytes (1/2/4/8) from `addr`, zero-extended to u64.
-    pub fn load(&self, addr: u64, width: usize) -> Result<u64> {
+    pub fn load(&mut self, addr: u64, width: usize) -> Result<u64> {
         match addr {
             0x0200_0000..=0x0200_FFFF => Ok(self.clint.load(addr, width)),
             0x0C00_0000..=0x0FFF_FFFF => Ok(self.plic.load(addr, width)),
@@ -109,26 +109,26 @@ mod tests {
 
     #[test]
     fn out_of_bounds_returns_err() {
-        let b = bus();
+        let mut b = bus();
         assert!(b.load(0x0000_0000, 4).is_err());
         assert!(b.load(0x8000_0040, 4).is_err());
     }
 
     #[test]
     fn clint_mtime_readable() {
-        let b = bus();
+        let mut b = bus();
         assert_eq!(b.load(0x0200_BFF8, 8).unwrap(), 0);
     }
 
     #[test]
     fn uart_lsr_returns_0x60() {
-        let b = bus();
+        let mut b = bus();
         assert_eq!(b.load(0x1000_0005, 1).unwrap(), 0x60);
     }
 
     #[test]
     fn plic_reads_zero() {
-        let b = bus();
+        let mut b = bus();
         assert_eq!(b.load(0x0C00_0000, 4).unwrap(), 0);
     }
 }
