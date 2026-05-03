@@ -82,7 +82,7 @@ impl Csr {
             0x180 => self.satp     = val,
             // Read-only: silently ignore
             0xf11..=0xf14 => {}
-            _ => {}
+            _ => {} // unimplemented or read-only: silently ignore (Priv §2.1)
         }
     }
 }
