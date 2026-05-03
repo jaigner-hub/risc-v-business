@@ -13,84 +13,126 @@ pub struct JitCache {
 }
 
 /// Load 1 byte (zero-extended to u64). Returns u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_load8(cpu: *mut Cpu, va: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_load8(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.load(va, 1) {
-        Ok(v)  => v,
-        Err(_) => u64::MAX,
-    }
+    cpu.bus.load(addr, 1).unwrap_or(u64::MAX)
 }
 
 /// Load 2 bytes (zero-extended to u64). Returns u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_load16(cpu: *mut Cpu, va: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_load16(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.load(va, 2) {
-        Ok(v)  => v,
-        Err(_) => u64::MAX,
-    }
+    cpu.bus.load(addr, 2).unwrap_or(u64::MAX)
 }
 
 /// Load 4 bytes (zero-extended to u64). Returns u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_load32(cpu: *mut Cpu, va: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_load32(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.load(va, 4) {
-        Ok(v)  => v,
-        Err(_) => u64::MAX,
-    }
+    cpu.bus.load(addr, 4).unwrap_or(u64::MAX)
 }
 
 /// Load 8 bytes. Returns u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_load64(cpu: *mut Cpu, va: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_load64(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.load(va, 8) {
-        Ok(v)  => v,
-        Err(_) => u64::MAX,
-    }
+    cpu.bus.load(addr, 8).unwrap_or(u64::MAX)
 }
 
 /// Store 1 byte. Returns 0 on success, u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_store8(cpu: *mut Cpu, va: u64, val: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_store8(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(va, 1, val) {
+    match cpu.bus.store(addr, 1, val) {
         Ok(_)  => 0,
         Err(_) => u64::MAX,
     }
 }
 
 /// Store 2 bytes. Returns 0 on success, u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_store16(cpu: *mut Cpu, va: u64, val: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_store16(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(va, 2, val) {
+    match cpu.bus.store(addr, 2, val) {
         Ok(_)  => 0,
         Err(_) => u64::MAX,
     }
 }
 
 /// Store 4 bytes. Returns 0 on success, u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_store32(cpu: *mut Cpu, va: u64, val: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_store32(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(va, 4, val) {
+    match cpu.bus.store(addr, 4, val) {
         Ok(_)  => 0,
         Err(_) => u64::MAX,
     }
 }
 
 /// Store 8 bytes. Returns 0 on success, u64::MAX on fault.
+///
+/// # Safety
+///
+/// `cpu` must be a non-null, properly aligned pointer to a live `Cpu` with no
+/// other mutable references to `*cpu` at the point of the call.
 #[no_mangle]
-pub unsafe extern "sysv64" fn jit_store64(cpu: *mut Cpu, va: u64, val: u64) -> u64 {
+pub unsafe extern "sysv64" fn jit_store64(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(va, 8, val) {
+    match cpu.bus.store(addr, 8, val) {
         Ok(_)  => 0,
         Err(_) => u64::MAX,
     }
 }
+
+type JitLoadFn  = unsafe extern "sysv64" fn(*mut Cpu, u64) -> u64;
+type JitStoreFn = unsafe extern "sysv64" fn(*mut Cpu, u64, u64) -> u64;
+
+/// Forces the linker to retain the eight memory-callout helpers above through LTO.
+/// JIT-generated machine code calls them by absolute address, so the compiler
+/// cannot otherwise see them as live. `#[used]` is only valid on statics, hence
+/// these arrays of function-pointer constants.
+#[used]
+static JIT_LOAD_CALLOUTS: [JitLoadFn; 4] =
+    [jit_load8, jit_load16, jit_load32, jit_load64];
+#[used]
+static JIT_STORE_CALLOUTS: [JitStoreFn; 4] =
+    [jit_store8, jit_store16, jit_store32, jit_store64];
 
 impl JitCache {
     pub fn new() -> Self {
