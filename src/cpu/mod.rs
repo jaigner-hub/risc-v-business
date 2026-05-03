@@ -77,9 +77,9 @@ impl Cpu {
     }
 
     pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
-        // Delegate to S-mode if medeleg has this exception bit set and we're not in M-mode.
-        // Priv §3.1.8
-        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode != PrivMode::M {
+        // Delegate to S-mode only if the trap originates from a less-privileged mode (U-mode).
+        // Per Priv §3.1.8, traps from S- or M-mode are never delegated to S-mode.
+        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode == PrivMode::U {
             self.csr.s_trap_entry(self.mode == PrivMode::S);
             self.csr.sepc   = self.pc;
             self.csr.scause = cause;
@@ -233,6 +233,20 @@ mod tests {
         c.mode = PrivMode::M;
         c.deliver_trap(11, 0);
         assert_eq!(c.csr.mcause, 11);
+        assert_eq!(c.pc, 0x8000_0100);
+        assert_eq!(c.mode, PrivMode::M);
+    }
+
+    #[test]
+    fn deliver_trap_s_mode_not_delegated_to_itself() {
+        // S-mode traps are never delegated to S-mode, even if medeleg has the bit.
+        // Priv §3.1.8: delegation only applies when trap originates below S-mode.
+        let mut c = cpu();
+        c.csr.mtvec  = 0x8000_0100;
+        c.csr.medeleg = 1 << 9; // ecall from S-mode
+        c.mode = PrivMode::S;
+        c.deliver_trap(9, 0);
+        assert_eq!(c.csr.mcause, 9);
         assert_eq!(c.pc, 0x8000_0100);
         assert_eq!(c.mode, PrivMode::M);
     }
