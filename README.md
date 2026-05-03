@@ -4,7 +4,7 @@ A RISC-V emulator in Rust, built to boot mainline Linux.
 
 **Target:** RV64IMA, M/S/U privilege levels, Sv39 MMU, OpenSBI + Linux + BusyBox initramfs.
 
-**Status:** Phase 2 complete — RV64IMA interpreter with M-mode privilege and trap delivery. 103 riscv-tests passing.
+**Status:** Phase 3 complete — S-mode supervisor privilege, Sv39 MMU with 64-entry TLB, MPRV. 164 riscv-tests passing.
 
 ## Phases
 
@@ -12,7 +12,7 @@ A RISC-V emulator in Rust, built to boot mainline Linux.
 |---|-------|--------|
 | 1 | RV64I interpreter, rv64ui-p-* passing (54 tests) | Done |
 | 2 | M/A extensions, Zicsr, M-mode privilege/traps, rv64um/ua/mi-p-* passing | Done |
-| 3 | S-mode privilege, Sv39 MMU, rv64si-p-* + rv64ui-v-* passing | In progress |
+| 3 | S-mode privilege, Sv39 MMU, rv64si-p-* + rv64ui-v-* passing (164 tests) | Done |
 | 4 | CLINT, PLIC, UART 16550, virtio-blk — OpenSBI banner | Not started |
 | 5 | Boot Linux to `#` prompt | Not started |
 
@@ -41,8 +41,8 @@ cargo test
 The test suite runs vendored `riscv-tests` ELFs from `tests/riscv-tests/`. If the directory is empty, build them first:
 
 ```bash
-# Requires: riscv64-unknown-elf-gcc, autoconf, make
-# Ubuntu/Debian: sudo apt install gcc-riscv64-unknown-elf autoconf
+# Requires: riscv64-unknown-elf-gcc, picolibc (for v-env harness), autoconf, make
+# Ubuntu/Debian: sudo apt install gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf autoconf
 bash scripts/fetch-riscv-tests.sh
 ```
 
