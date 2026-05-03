@@ -16,6 +16,14 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     // Most instructions advance pc by 4. Branches and jumps set pc directly.
     let mut next_pc = pc.wrapping_add(4);
 
+    // MPRV (mstatus[17]): loads/stores use MPP-mode translation when set. Priv §3.1.6.3.
+    // Instruction fetch is NOT affected by MPRV.
+    let ls_mode = if (cpu.csr.mstatus >> 17) & 1 == 1 {
+        match (cpu.csr.mstatus >> 11) & 3 { 0 => PrivMode::U, 1 => PrivMode::S, _ => PrivMode::M }
+    } else {
+        cpu.mode
+    };
+
     match inst {
         // --- R-type arithmetic ---
         Instruction::Add  { rd, rs1, rs2 } => {
@@ -118,7 +126,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // All addresses go through the MMU. Page faults deliver a trap and skip set_reg.
         Instruction::Lb  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 1) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -128,7 +136,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Lh  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 2) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -138,7 +146,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Lw  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -148,7 +156,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Ld  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 8) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -158,7 +166,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Lbu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 1) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -168,7 +176,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Lhu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 2) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -178,7 +186,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Lwu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -190,7 +198,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // --- Stores ---
         Instruction::Sb { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.store(pa, 1, cpu.reg(rs2)) {
                     Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
@@ -200,7 +208,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Sh { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.store(pa, 2, cpu.reg(rs2)) {
                     Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
@@ -210,7 +218,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Sw { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.store(pa, 4, cpu.reg(rs2)) {
                     Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
@@ -220,7 +228,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Sd { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.store(pa, 8, cpu.reg(rs2)) {
                     Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
@@ -323,6 +331,8 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             let mpp = (cpu.csr.mstatus >> 11) & 3;
             cpu.mode = match mpp { 0 => PrivMode::U, 1 => PrivMode::S, _ => PrivMode::M };
             cpu.csr.mret(); // MIE←MPIE, MPIE←1, MPP←U
+            // If returning to non-M mode, clear MPRV. Priv §3.3.2.
+            if mpp != 3 { cpu.csr.mstatus &= !(1u64 << 17); }
             next_pc = cpu.csr.mepc;
         },
         // SRET: restore privilege to SPP, jump to sepc. Illegal when in S-mode with mstatus.TSR=1. Priv §3.1.6.5
@@ -333,8 +343,18 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             } else {
                 let spp = (cpu.csr.mstatus >> 8) & 1;
                 cpu.mode = if spp == 1 { PrivMode::S } else { PrivMode::U };
+                cpu.csr.mstatus &= !(1u64 << 17); // SRET always clears MPRV (SPP can't be M). Priv §3.3.2
                 cpu.csr.s_ret(); // SIE←SPIE, SPIE←1, SPP←0
                 next_pc = cpu.csr.sepc;
+            }
+        },
+        Instruction::SfenceVma => {
+            // TVM=mstatus[20]: S-mode execution of SFENCE.VMA with TVM=1 is illegal. Priv §3.1.6.5.
+            if cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0);
+                next_pc = cpu.pc;
+            } else {
+                cpu.mmu.flush();
             }
         },
         // --- Zicsr (CSR access) ---
@@ -343,37 +363,62 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // mnemonic. If rd=x0, the read is suppressed for csrrw[i] (no side effects);
         // for the others, if rs1/uimm is 0, the write is suppressed.
         Instruction::Csrrw { rd, rs1, csr } => {
-            let new_val = cpu.reg(rs1);
-            let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
-            cpu.csr_write(csr, new_val);
-            cpu.set_reg(rd, old);
+            // TVM: S-mode satp access with TVM=1 is illegal. Priv §3.1.6.5.
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let new_val = cpu.reg(rs1);
+                let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+                cpu.csr_write(csr, new_val);
+                cpu.set_reg(rd, old);
+            }
         },
         Instruction::Csrrs { rd, rs1, csr } => {
-            let old = cpu.csr_read(csr);
-            let mask = cpu.reg(rs1);
-            if rs1 != 0 { cpu.csr_write(csr, old | mask); }
-            cpu.set_reg(rd, old);
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let old = cpu.csr_read(csr);
+                let mask = cpu.reg(rs1);
+                if rs1 != 0 { cpu.csr_write(csr, old | mask); }
+                cpu.set_reg(rd, old);
+            }
         },
         Instruction::Csrrc { rd, rs1, csr } => {
-            let old = cpu.csr_read(csr);
-            let mask = cpu.reg(rs1);
-            if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
-            cpu.set_reg(rd, old);
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let old = cpu.csr_read(csr);
+                let mask = cpu.reg(rs1);
+                if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
+                cpu.set_reg(rd, old);
+            }
         },
         Instruction::Csrrwi { rd, uimm, csr } => {
-            let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
-            cpu.csr_write(csr, uimm as u64);
-            cpu.set_reg(rd, old);
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+                cpu.csr_write(csr, uimm as u64);
+                cpu.set_reg(rd, old);
+            }
         },
         Instruction::Csrrsi { rd, uimm, csr } => {
-            let old = cpu.csr_read(csr);
-            if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
-            cpu.set_reg(rd, old);
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let old = cpu.csr_read(csr);
+                if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
+                cpu.set_reg(rd, old);
+            }
         },
         Instruction::Csrrci { rd, uimm, csr } => {
-            let old = cpu.csr_read(csr);
-            if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
-            cpu.set_reg(rd, old);
+            if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
+                cpu.deliver_trap(2, 0); next_pc = cpu.pc;
+            } else {
+                let old = cpu.csr_read(csr);
+                if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
+                cpu.set_reg(rd, old);
+            }
         },
         // --- M extension: integer multiply/divide ---
         // Spec: Unprivileged §7
@@ -477,7 +522,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // Spec: Unprivileged §8. Single-hart: aq/rl ordering is trivially satisfied.
         Instruction::LrD { rd, rs1 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 8) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -487,7 +532,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::LrW { rd, rs1 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Load) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
@@ -497,7 +542,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::ScD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     if cpu.reservation == Some(pa) {
@@ -512,7 +557,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::ScW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     if cpu.reservation == Some(pa) {
@@ -527,77 +572,77 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmoswapD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoswapW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoaddD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old.wrapping_add(cpu.reg(rs2))).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoaddW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old.wrapping_add(cpu.reg(rs2))).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoxorD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old ^ cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoxorW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old ^ cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoandD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old & cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoandW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old & cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoorD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = cpu.bus.load(pa, 8).unwrap_or(0); cpu.bus.store(pa, 8, old | cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmoorW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => { let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31); cpu.bus.store(pa, 4, old | cpu.reg(rs2)).ok(); cpu.set_reg(rd, old); }
             }
         },
         Instruction::AmominD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = cpu.bus.load(pa, 8).unwrap_or(0);
@@ -609,7 +654,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmominW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
@@ -622,7 +667,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmomaxD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = cpu.bus.load(pa, 8).unwrap_or(0);
@@ -634,7 +679,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmomaxW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
@@ -647,7 +692,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmominuD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = cpu.bus.load(pa, 8).unwrap_or(0);
@@ -659,7 +704,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmominuW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
@@ -672,7 +717,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmomaxuD { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = cpu.bus.load(pa, 8).unwrap_or(0);
@@ -684,7 +729,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::AmomaxuW { rd, rs1, rs2 } => {
             let va = cpu.reg(rs1);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, va, AccessType::Store) {
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => {
                     let old = sext(cpu.bus.load(pa, 4).unwrap_or(0), 31);
