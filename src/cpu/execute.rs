@@ -413,8 +413,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoswapW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let new = sext(cpu.reg(rs2), 31);
-            cpu.bus.store(addr, 4, new)?;
+            cpu.bus.store(addr, 4, cpu.reg(rs2))?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmoaddD { rd, rs1, rs2 } => {
@@ -426,8 +425,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoaddW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let new = sext(old.wrapping_add(cpu.reg(rs2)), 31);
-            cpu.bus.store(addr, 4, new)?;
+            cpu.bus.store(addr, 4, old.wrapping_add(cpu.reg(rs2)))?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmoxorD { rd, rs1, rs2 } => {
@@ -439,8 +437,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoxorW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let new = sext(old ^ cpu.reg(rs2), 31);
-            cpu.bus.store(addr, 4, new)?;
+            cpu.bus.store(addr, 4, old ^ cpu.reg(rs2))?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmoandD { rd, rs1, rs2 } => {
@@ -452,8 +449,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoandW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let new = sext(old & cpu.reg(rs2), 31);
-            cpu.bus.store(addr, 4, new)?;
+            cpu.bus.store(addr, 4, old & cpu.reg(rs2))?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmoorD { rd, rs1, rs2 } => {
@@ -465,8 +461,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoorW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            let new = sext(old | cpu.reg(rs2), 31);
-            cpu.bus.store(addr, 4, new)?;
+            cpu.bus.store(addr, 4, old | cpu.reg(rs2))?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmominD { rd, rs1, rs2 } => {
@@ -510,7 +505,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
             let rs2v = cpu.reg(rs2) as u32;
-            let new = if (old as u32) < rs2v { old } else { sext(rs2v as u64, 31) };
+            let new = if (old as u32) < rs2v { old } else { rs2v as u64 };
             cpu.bus.store(addr, 4, new)?;
             cpu.set_reg(rd, old);
         },
@@ -525,7 +520,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
             let rs2v = cpu.reg(rs2) as u32;
-            let new = if (old as u32) > rs2v { old } else { sext(rs2v as u64, 31) };
+            let new = if (old as u32) > rs2v { old } else { rs2v as u64 };
             cpu.bus.store(addr, 4, new)?;
             cpu.set_reg(rd, old);
         },
