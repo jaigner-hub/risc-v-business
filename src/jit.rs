@@ -1006,4 +1006,62 @@ mod tests {
         unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
         assert_eq!(cpu.regs[3], 42);
     }
+
+    // DIV x3, x1, x2 with x2 == 0.
+    // Per RISC-V spec §7.2, signed division by zero must return -1 (u64::MAX).
+    #[test]
+    fn jit_div_by_zero() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 42;
+        cpu.regs[2] = 0;
+        cpu.bus.store(ram,     4, 0x0220C1B3u64).unwrap(); // DIV x3, x1, x2
+        cpu.bus.store(ram + 4, 4, 0x00000073u64).unwrap(); // ECALL (ends block)
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], u64::MAX);
+    }
+
+    // DIV x3, x1, x2 with x1 == i64::MIN, x2 == -1.
+    // Per RISC-V spec §7.2, signed overflow must return i64::MIN unchanged.
+    #[test]
+    fn jit_div_overflow() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = i64::MIN as u64;
+        cpu.regs[2] = (-1i64) as u64;
+        cpu.bus.store(ram,     4, 0x0220C1B3u64).unwrap(); // DIV x3, x1, x2
+        cpu.bus.store(ram + 4, 4, 0x00000073u64).unwrap(); // ECALL
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], i64::MIN as u64);
+    }
+
+    // REM x3, x1, x2  = funct7=1, rs2=2, rs1=1, funct3=6, rd=3, opcode=0x33
+    // = (1<<25)|(2<<20)|(1<<15)|(6<<12)|(3<<7)|0x33 = 0x0220E1B3
+    // Per RISC-V spec §7.2, remainder by zero must return the dividend (x1).
+    #[test]
+    fn jit_rem_div_by_zero() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 99;
+        cpu.regs[2] = 0;
+        cpu.bus.store(ram,     4, 0x0220E1B3u64).unwrap(); // REM x3, x1, x2
+        cpu.bus.store(ram + 4, 4, 0x00000073u64).unwrap(); // ECALL
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], 99);
+    }
 }
