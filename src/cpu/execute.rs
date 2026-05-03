@@ -491,8 +491,13 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 cpu.deliver_trap(2, 0);
                 next_pc = cpu.pc;
             } else {
+                // Flush the SW TLB — VA→PA translations may have changed.
+                // Do NOT set jit_invalidate here: sfence.vma in practice fires
+                // for set_memory_rw/ro (permission-only PTE changes) as well as
+                // context-switch shootdowns. In both cases the VA→PA mapping is
+                // unchanged so compiled JIT blocks remain valid. Real address-space
+                // switches always write satp, which already sets jit_invalidate.
                 cpu.mmu.flush();
-                cpu.jit_invalidate = true;
             }
         },
         // --- Zicsr (CSR access) ---

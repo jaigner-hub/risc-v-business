@@ -502,13 +502,16 @@ mod tests {
     }
 
     #[test]
-    fn sfence_sets_jit_invalidate() {
+    fn sfence_does_not_set_jit_invalidate() {
         use crate::cpu::execute::execute;
         use crate::cpu::decode::Instruction;
         let mut c = cpu();
         c.jit_invalidate = false;
         execute(&mut c, Instruction::SfenceVma).unwrap();
-        assert!(c.jit_invalidate, "SFENCE.VMA must set jit_invalidate");
+        // sfence.vma only flushes the SW TLB; JIT blocks remain valid because
+        // VA→PA mappings don't change on permission-only PTE updates.
+        // Real address-space switches write satp, which sets jit_invalidate.
+        assert!(!c.jit_invalidate, "SFENCE.VMA must NOT set jit_invalidate");
     }
 
     #[test]
