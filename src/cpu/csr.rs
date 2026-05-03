@@ -132,13 +132,13 @@ impl Csr {
             0x304 => self.mie      = val,
             0x305 => self.mtvec    = val,
             0x340 => self.mscratch = val,
-            0x341 => self.mepc     = val & !0x3,  // IALIGN=32: bits[1:0] always 0
+            0x341 => self.mepc     = val & !0x1,  // IALIGN=16 (RVC): only bit 0 forced to 0
             0x342 => self.mcause   = val,
             0x343 => self.mtval    = val,
             0x344 => self.mip      = val,
             0x105 => self.stvec    = val,
             0x140 => self.sscratch = val,
-            0x141 => self.sepc     = val,
+            0x141 => self.sepc     = val & !0x1,  // IALIGN=16 (RVC): only bit 0 forced to 0
             0x142 => self.scause   = val,
             0x143 => self.stval    = val,
             0x180 => self.satp     = val,
@@ -278,5 +278,23 @@ mod tests {
         let mut csr = Csr::new();
         csr.write(0x305, 0x8000_1001); // base=0x8000_1000, MODE=1 (vectored)
         assert_eq!(csr.read(0x305), 0x8000_1001);
+    }
+
+    #[test]
+    fn mepc_preserves_rvc_alignment() {
+        let mut csr = Csr::new();
+        csr.write(0x341, 0x8000_1002); // bit 1 set (RVC 2-byte alignment)
+        assert_eq!(csr.read(0x341), 0x8000_1002); // bit 1 preserved
+        csr.write(0x341, 0x8000_1001); // bit 0 set (odd, illegal)
+        assert_eq!(csr.read(0x341), 0x8000_1000); // bit 0 forced to 0
+    }
+
+    #[test]
+    fn sepc_preserves_rvc_alignment() {
+        let mut csr = Csr::new();
+        csr.write(0x141, 0x8000_1002); // bit 1 set (valid RVC address)
+        assert_eq!(csr.read(0x141), 0x8000_1002);
+        csr.write(0x141, 0x8000_1003); // bits 0 and 1 set
+        assert_eq!(csr.read(0x141), 0x8000_1002); // bit 0 forced to 0
     }
 }
