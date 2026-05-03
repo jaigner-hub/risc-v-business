@@ -19,6 +19,8 @@ pub struct Csr {
     pub pmpcfg0:  u64,
     pub pmpcfg2:  u64,
     pub pmpaddr:  [u64; 16],
+    /// Sstc extension: supervisor timer compare register. Priv §15.
+    pub stimecmp: u64,
 }
 
 impl Csr {
@@ -45,6 +47,7 @@ impl Csr {
             pmpcfg0:  0,
             pmpcfg2:  0,
             pmpaddr:  [0u64; 16],
+            stimecmp: u64::MAX,
         }
     }
 
@@ -83,6 +86,7 @@ impl Csr {
             0x144 => self.mip  & 0x222,  // sip: S-mode view of mip. Priv §4.1.4
             0x302 => self.medeleg,       // medeleg. Priv §3.1.8
             0x303 => self.mideleg,       // mideleg. Priv §3.1.8
+            0x14D => self.stimecmp,      // stimecmp (Sstc). Priv §15
             _ => 0,
         }
     }
@@ -156,6 +160,7 @@ impl Csr {
             0x144 => self.mip  = (self.mip  & !0x002) | (val & 0x002),
             0x302 => self.medeleg = val,
             0x303 => self.mideleg = val,
+            0x14D => self.stimecmp = val, // stimecmp (Sstc). Priv §15
             _ => {} // unimplemented or read-only: silently ignore (Priv §2.1)
         }
     }

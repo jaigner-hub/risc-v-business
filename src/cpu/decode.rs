@@ -131,6 +131,12 @@ pub enum Instruction {
     Csrrwi { rd: usize, uimm: u32, csr: u16 },
     Csrrsi { rd: usize, uimm: u32, csr: u16 },
     Csrrci { rd: usize, uimm: u32, csr: u16 },
+    // --- F/D extension load/store (Phase 5 minimal: register save/restore only) ---
+    // Spec: Unprivileged §11 (F), §12 (D). No FP arithmetic implemented.
+    Flw { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=010
+    Fld { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=011
+    Fsw { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=010
+    Fsd { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=011
 }
 
 /// Sign-extend the high 12 bits of inst (I-type immediate).
@@ -263,6 +269,26 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
+        // FP loads (LOAD_FP): opcode 0x07 — I-type. Spec: Unprivileged §11.5, §12.3
+        0x07 => {
+            let imm = i_imm(inst);
+            // rd field encodes the FP destination register (fd).
+            match funct3 {
+                0x2 => Ok(Instruction::Flw { fd: rd, rs1, imm }),
+                0x3 => Ok(Instruction::Fld { fd: rd, rs1, imm }),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+            }
+        },
+        // FP stores (STORE_FP): opcode 0x27 — S-type. Spec: Unprivileged §11.5, §12.3
+        0x27 => {
+            let imm = s_imm(inst);
+            // rs2 field encodes the FP source register (fs2).
+            match funct3 {
+                0x2 => Ok(Instruction::Fsw { rs1, fs2: rs2, imm }),
+                0x3 => Ok(Instruction::Fsd { rs1, fs2: rs2, imm }),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+            }
+        },
         // Stores: opcode 0x23
         0x23 => {
             let imm = s_imm(inst);
@@ -378,6 +404,12 @@ pub fn decode_rvc(inst: u16) -> Result<Instruction> {
                     if uimm == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
                     Ok(Instruction::Addi { rd: rd_p, rs1: 2, imm: uimm as i64 })
                 }
+                0b001 => {
+                    // C.FLD (RV64, D): fld fd', uimm(rs1') — same offset as C.LD
+                    let uimm = ((w >> 10) & 7) << 3  // inst[12:10]→ imm[5:3]
+                             | ((w >> 5) & 3) << 6;  // inst[6:5]  → imm[7:6]
+                    Ok(Instruction::Fld { fd: rd_p, rs1: rs1_p, imm: uimm as i64 })
+                }
                 0b010 => {
                     // C.LW: lw rd', uimm(rs1')
                     let uimm = ((w >> 6) & 1) << 2
@@ -390,6 +422,13 @@ pub fn decode_rvc(inst: u16) -> Result<Instruction> {
                     let uimm = ((w >> 10) & 7) << 3  // inst[12:10]→ imm[5:3]
                              | ((w >> 5) & 3) << 6;  // inst[6:5]  → imm[7:6]
                     Ok(Instruction::Ld { rd: rd_p, rs1: rs1_p, imm: uimm as i64 })
+                }
+                0b101 => {
+                    // C.FSD (RV64, D): fsd fs2', uimm(rs1') — same offset as C.SD
+                    let fs2_p = rp(2);
+                    let uimm = ((w >> 10) & 7) << 3  // inst[12:10]→ imm[5:3]
+                             | ((w >> 5) & 3) << 6;  // inst[6:5]  → imm[7:6]
+                    Ok(Instruction::Fsd { rs1: rs1_p, fs2: fs2_p, imm: uimm as i64 })
                 }
                 0b110 => {
                     // C.SW: sw rs2', uimm(rs1')
@@ -533,6 +572,13 @@ pub fn decode_rvc(inst: u16) -> Result<Instruction> {
                     let shamt = (((w >> 12) & 1) << 5 | ((w >> 2) & 0x1f)) as u32;
                     Ok(Instruction::Slli { rd: rd_rs1, rs1: rd_rs1, shamt })
                 }
+                0b001 => {
+                    // C.FLDSP (RV64, D): fld rd, uimm(sp) — same offset as C.LDSP
+                    let uimm = ((w >> 12) & 1) << 5
+                             | ((w >> 5) & 3) << 3   // inst[6:5] → imm[4:3]
+                             | ((w >> 2) & 7) << 6;  // inst[4:2] → imm[8:6]
+                    Ok(Instruction::Fld { fd: rd_rs1, rs1: 2, imm: uimm as i64 })
+                }
                 0b010 => {
                     // C.LWSP: lw rd, uimm(sp)  (rd must be nonzero)
                     if rd_rs1 == 0 { return Err(anyhow::Error::new(IllegalInstruction(w))); }
@@ -564,6 +610,12 @@ pub fn decode_rvc(inst: u16) -> Result<Instruction> {
                             Ok(Instruction::Add { rd, rs1: rd_rs1, rs2 }),         // C.ADD
                         _ => Err(anyhow::Error::new(IllegalInstruction(w))),
                     }
+                }
+                0b101 => {
+                    // C.FSDSP (RV64, D): fsd rs2, uimm(sp) — same offset as C.SDSP
+                    let uimm = ((w >> 10) & 7) << 3   // inst[12:10]→ imm[5:3]
+                             | ((w >> 7) & 7) << 6;   // inst[9:7]  → imm[8:6]
+                    Ok(Instruction::Fsd { rs1: 2, fs2: rs2, imm: uimm as i64 })
                 }
                 0b110 => {
                     // C.SWSP: sw rs2, uimm(sp)

@@ -32,6 +32,10 @@ impl Tracer {
 
 pub struct Cpu {
     regs:   [u64; 32],
+    /// Floating-point registers (F/D extension). Stored as u64 to hold either
+    /// a 32-bit single (NaN-boxed in upper bits) or a 64-bit double.
+    /// Phase 5: only FLW/FLD/FSW/FSD use these — no FP arithmetic implemented.
+    pub fregs: [u64; 32],
     pub pc: u64,
     pub bus: Bus,
     pub tracer: Tracer,
@@ -42,6 +46,9 @@ pub struct Cpu {
     /// Size of the current instruction in bytes (4 for full, 2 for RVC).
     /// execute() reads this to compute link-register and next-PC values.
     pub inst_size: u64,
+    /// Floating-point control and status register (CSR 0x003).
+    /// Stub: not driven by FP arithmetic, but preserved across save/restore.
+    pub fcsr: u32,
 }
 
 // Compute trap PC per Priv §5.1.10: vectored mode dispatches interrupts to base + cause_code*4.
@@ -60,6 +67,7 @@ impl Cpu {
     pub fn new(bus: Bus, entry: u64, trace: bool) -> Self {
         Self {
             regs: [0u64; 32],
+            fregs: [0u64; 32],
             pc: entry,
             bus,
             tracer: Tracer::new(trace),
@@ -68,12 +76,16 @@ impl Cpu {
             mode: PrivMode::M,
             mmu: mmu::Mmu::new(),
             inst_size: 4,
+            fcsr: 0,
         }
     }
 
     #[inline]
     pub fn csr_read(&self, addr: u16) -> u64 {
-        self.csr.read(addr)
+        match addr {
+            0xC01 => self.bus.clint.mtime, // time: read CLINT mtime. Priv §3.2.1
+            _ => self.csr.read(addr),
+        }
     }
 
     #[inline]

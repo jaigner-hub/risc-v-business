@@ -53,7 +53,14 @@ impl Mmu {
         addr:    u64,
         access:  AccessType,
     ) -> Result<u64, MmuFault> {
-        if (satp >> 60) != 8 || mode == PrivMode::M {
+        // Determine walk depth from satp.MODE. Sv39=8 (3 levels), Sv57=10 (5 levels).
+        let satp_mode = satp >> 60;
+        let levels: usize = match satp_mode {
+            8  => 3,
+            10 => 5,
+            _  => return Ok(addr), // bare / unrecognised mode
+        };
+        if mode == PrivMode::M {
             return Ok(addr);
         }
 
@@ -61,8 +68,11 @@ impl Mmu {
         let page_offset = addr & 0xFFF;
         let asid = ((satp >> 44) & 0xFFFF) as u16;
 
-        // Canonical VA check: bits[63:39] must sign-extend bit[38]. Priv §4.3.1
-        let top = (addr as i64) >> 38;
+        // Canonical VA check: top bits must sign-extend the MSB of the top VPN field.
+        // Sv39: bits[63:39] sign-extend bit[38]. Sv57: bits[63:57] sign-extend bit[56].
+        // sign_bit = 12 + levels * 9 - 1. Priv §4.3.1 (Sv39), §4.6 (Sv57).
+        let sign_bit = 12 + levels * 9 - 1;
+        let top = (addr as i64) >> sign_bit;
         if top != 0 && top != -1 {
             return Err(MmuFault { cause: pf_cause(access), tval: addr });
         }
@@ -85,12 +95,15 @@ impl Mmu {
             }
         }
 
-        // 3-level Sv39 page table walk. Priv §4.3.2.
-        // VA layout: VPN[2]=bits[38:30], VPN[1]=bits[29:21], VPN[0]=bits[20:12]
-        let vpn_parts = [(addr >> 30) & 0x1FF, (addr >> 21) & 0x1FF, (addr >> 12) & 0x1FF];
+        // Page table walk (Sv39: 3 levels, Sv57: 5 levels). Priv §4.3.2 / §4.6.
+        // vpn_parts[i] = VPN[levels-1-i], i.e. vpn_parts[0] is the top-level index.
+        let mut vpn_parts = [0u64; 5];
+        for i in 0..levels {
+            vpn_parts[i] = (addr >> (12 + (levels - 1 - i) * 9)) & 0x1FF;
+        }
         let mut table_pa = (satp & 0x0FFF_FFFF_FFFF) << 12;
 
-        for level in 0usize..3 {
+        for level in 0..levels {
             let pte_addr = table_pa + vpn_parts[level] * 8;
             let pte = bus.load(pte_addr, 8)
                 .map_err(|_| MmuFault { cause: af_cause(access), tval: addr })?;
@@ -104,7 +117,7 @@ impl Mmu {
                 let ppn = (pte >> 10) & 0x0FFF_FFFF_FFFF;
 
                 // Superpage alignment check: lower VPN bits of PPN must be zero. Priv §4.3.2 step 5.
-                let rem = 2 - level; // 0=4K, 1=2MB, 2=1GB
+                let rem = levels - 1 - level;
                 if rem > 0 && ppn & ((1u64 << (rem * 9)) - 1) != 0 {
                     return Err(MmuFault { cause: pf_cause(access), tval: addr });
                 }
@@ -243,6 +256,56 @@ mod tests {
         let bad_va: u64 = 0x0080_0000_0000; // bit 38=0 but bits 39+ set → non-canonical
         let result = mmu.translate(&mut b, satp, PrivMode::S, 0, bad_va, AccessType::Load);
         assert_eq!(result.unwrap_err().cause, 13); // load page fault
+    }
+
+    #[test]
+    fn sv57_passthrough_when_m_mode() {
+        let mut mmu = Mmu::new();
+        let mut b = bus();
+        let satp_sv57 = (10u64 << 60) | 0x8_0000;
+        let result = mmu.translate(&mut b, satp_sv57, PrivMode::M, 0, 0xDEAD_0000, AccessType::Load);
+        assert_eq!(result.unwrap(), 0xDEAD_0000);
+    }
+
+    #[test]
+    fn sv57_bad_va_canonical_check() {
+        let mut b = bus();
+        // Sv57 canonical: bits[63:57] must sign-extend bit[56].
+        // VA with bit 56=0 but bit 57 set is non-canonical.
+        let satp: u64 = 10u64 << 60;
+        let mut mmu = Mmu::new();
+        let bad_va: u64 = 0x0200_0000_0000_0000; // bit 57 set, bit 56 = 0
+        let result = mmu.translate(&mut b, satp, PrivMode::S, 0, bad_va, AccessType::Load);
+        assert_eq!(result.unwrap_err().cause, 13); // load page fault
+    }
+
+    #[test]
+    fn sv57_5level_page_walk() {
+        // VA=0x0000_0000_0000_1ABC: all VPN fields 0 except VPN[0]=1.
+        // 5 page tables × 4KB = 20KB; needs a 32KB bus.
+        let mut b = Bus::new(0x8000, 0x8000_0000);
+        // Level 4 table at 0x8000_0000. VPN[4]=0 → entry 0.
+        let l3_ppn: u64 = 0x8000_1000 >> 12;
+        b.store(0x8000_0000, 8, (l3_ppn << 10) | PTE_V).unwrap();
+        // Level 3 table at 0x8000_1000. VPN[3]=0 → entry 0.
+        let l2_ppn: u64 = 0x8000_2000 >> 12;
+        b.store(0x8000_1000, 8, (l2_ppn << 10) | PTE_V).unwrap();
+        // Level 2 table at 0x8000_2000. VPN[2]=0 → entry 0.
+        let l1_ppn: u64 = 0x8000_3000 >> 12;
+        b.store(0x8000_2000, 8, (l1_ppn << 10) | PTE_V).unwrap();
+        // Level 1 table at 0x8000_3000. VPN[1]=0 → entry 0.
+        let l0_ppn: u64 = 0x8000_4000 >> 12;
+        b.store(0x8000_3000, 8, (l0_ppn << 10) | PTE_V).unwrap();
+        // Level 0 (leaf) at 0x8000_4000. VPN[0] of 0x1ABC = 1 → PTE at offset 8.
+        let target_ppn: u64 = 0x8001_0000 >> 12;
+        let leaf_pte: u64 = (target_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+        b.store(0x8000_4000 + 1 * 8, 8, leaf_pte).unwrap();
+
+        let satp: u64 = (10u64 << 60) | (0x8000_0000u64 >> 12);
+        let mstatus: u64 = 1 << 18; // SUM=1
+        let mut mmu = Mmu::new();
+        let pa = mmu.translate(&mut b, satp, PrivMode::S, mstatus, 0x0000_0000_0000_1ABC, AccessType::Load).unwrap();
+        assert_eq!(pa, 0x8001_0ABC);
     }
 
     #[test]

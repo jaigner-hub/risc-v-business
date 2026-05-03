@@ -237,6 +237,51 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             }
         },
 
+        // --- FP loads/stores (F/D extension, Phase 5 minimal) ---
+        // Spec: Unprivileged §11.5 (FLW/FSW), §12.3 (FLD/FSD).
+        // No FP arithmetic — these are pure memory<->fregs movement so kernel
+        // context save/restore (signal handlers, task switches) works.
+        Instruction::Flw { fd, rs1, imm } => {
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 4) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.fregs[fd] = v, // store as zero-extended u64 (low 32 bits)
+                }
+            }
+        },
+        Instruction::Fld { fd, rs1, imm } => {
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.load(pa, 8) {
+                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
+                    Ok(v)  => cpu.fregs[fd] = v,
+                }
+            }
+        },
+        Instruction::Fsw { rs1, fs2, imm } => {
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 4, cpu.fregs[fs2]) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
+        },
+        Instruction::Fsd { rs1, fs2, imm } => {
+            let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
+                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
+                Ok(pa) => match cpu.bus.store(pa, 8, cpu.fregs[fs2]) {
+                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
+                    Ok(_)  => {}
+                }
+            }
+        },
+
         // --- Branches ---
         // Misaligned branch targets trap before the instruction commits. Spec: Priv §3.1.15
         Instruction::Beq  { rs1, rs2, imm } => {
