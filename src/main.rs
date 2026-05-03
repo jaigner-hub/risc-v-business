@@ -38,6 +38,10 @@ fn main() -> Result<()> {
 
     loop {
         cpu.step()?;
-        cpu.bus.clint.tick();
+        if cpu.bus.clint.tick() {
+            cpu.csr.mip |= 1 << 7;    // set MTIP
+        } else {
+            cpu.csr.mip &= !(1u64 << 7); // clear MTIP
+        }
     }
 }
