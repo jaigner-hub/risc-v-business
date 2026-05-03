@@ -413,7 +413,8 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::AmoswapW { rd, rs1, rs2 } => {
             let addr = cpu.reg(rs1);
             let old = sext(cpu.bus.load(addr, 4)?, 31);
-            cpu.bus.store(addr, 4, cpu.reg(rs2))?;
+            let new = sext(cpu.reg(rs2), 31);
+            cpu.bus.store(addr, 4, new)?;
             cpu.set_reg(rd, old);
         },
         Instruction::AmoaddD { rd, rs1, rs2 } => {
