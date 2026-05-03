@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use dynasmrt::{dynasm, DynasmApi, AssemblyOffset, ExecutableBuffer, x64::Assembler};
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, AssemblyOffset, ExecutableBuffer, x64::Assembler};
 use crate::cpu::decode::{decode, Instruction};
 use crate::cpu::Cpu;
 
@@ -585,6 +585,257 @@ impl JitCache {
                     }
                 }
 
+                // M-extension: multiply
+                Instruction::Mul { rd, rs1, rs2 } => {
+                    emit_r_op(&mut ops, rd, rs1, rs2, |ops| {
+                        dynasm!(ops ; .arch x64 ; imul rax, rcx);
+                    });
+                }
+                Instruction::Mulh { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        ; imul rcx          // rdx:rax = signed product; upper bits in rdx
+                        ; mov rax, rdx
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Mulhu { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        ; mul rcx            // rdx:rax = unsigned product
+                        ; mov rax, rdx
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Mulhsu { .. } => {
+                    emit_slow_path(&mut ops);
+                    break;
+                }
+                Instruction::Mulw { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov eax, DWORD [r15 + rs1_off]
+                        ; imul eax, DWORD [r15 + rs2_off]
+                        ; movsxd rax, eax
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+
+                // M-extension: divide / remainder (signed 64-bit)
+                Instruction::Div { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        // Division by zero: return -1
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; mov rax, QWORD -1i64
+                        ; jmp =>done
+                        ;not_zero:
+                        // Overflow: i64::MIN / -1 → return i64::MIN
+                        ; mov rdx, QWORD i64::MIN as i64
+                        ; cmp rax, rdx
+                        ; jne >no_overflow
+                        ; cmp rcx, -1i32
+                        ; jne >no_overflow
+                        ; jmp =>done          // rax already = i64::MIN
+                        ;no_overflow:
+                        ; cqo                  // sign-extend rax → rdx:rax
+                        ; idiv rcx
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Divu { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; mov rax, QWORD -1i64   // u64::MAX
+                        ; jmp =>done
+                        ;not_zero:
+                        ; xor rdx, rdx
+                        ; div rcx
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Rem { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        // Div-by-zero: remainder = dividend
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; jmp =>done          // rax already = dividend
+                        ;not_zero:
+                        // Overflow: i64::MIN % -1 = 0
+                        ; mov rdx, QWORD i64::MIN as i64
+                        ; cmp rax, rdx
+                        ; jne >no_overflow
+                        ; cmp rcx, -1i32
+                        ; jne >no_overflow
+                        ; xor eax, eax
+                        ; jmp =>done
+                        ;no_overflow:
+                        ; cqo
+                        ; idiv rcx
+                        ; mov rax, rdx        // remainder in rdx
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Remu { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, QWORD [r15 + rs1_off]
+                        ; mov rcx, QWORD [r15 + rs2_off]
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; jmp =>done          // remu div-by-zero = dividend
+                        ;not_zero:
+                        ; xor rdx, rdx
+                        ; div rcx
+                        ; mov rax, rdx
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+
+                // M-extension: 32-bit W-variants
+                Instruction::Divw { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; movsxd rax, DWORD [r15 + rs1_off]
+                        ; movsxd rcx, DWORD [r15 + rs2_off]
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; mov rax, QWORD -1i64       // div-by-zero: -1 (sign-extended)
+                        ; jmp =>done
+                        ;not_zero:
+                        ; mov rdx, QWORD i64::MIN as i64
+                        ; cmp rax, rdx
+                        ; jne >no_overflow
+                        ; cmp rcx, -1i32
+                        ; jne >no_overflow
+                        ; jmp =>done           // overflow: return i64::MIN already in rax
+                        ;no_overflow:
+                        ; cqo
+                        ; idiv rcx
+                        ; movsxd rax, eax      // sign-extend 32-bit quotient to 64 bits
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Divuw { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov eax, DWORD [r15 + rs1_off]    // zero-extend
+                        ; mov ecx, DWORD [r15 + rs2_off]    // zero-extend
+                        ; test ecx, ecx
+                        ; jnz >not_zero
+                        ; mov rax, QWORD -1i64
+                        ; jmp =>done
+                        ;not_zero:
+                        ; xor edx, edx
+                        ; div ecx
+                        ; movsxd rax, eax
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Remw { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; movsxd rax, DWORD [r15 + rs1_off]
+                        ; movsxd rcx, DWORD [r15 + rs2_off]
+                        ; test rcx, rcx
+                        ; jnz >not_zero
+                        ; movsxd rax, eax      // div-by-zero: remainder = dividend sign-extended
+                        ; jmp =>done
+                        ;not_zero:
+                        ; mov rdx, QWORD i64::MIN as i64
+                        ; cmp rax, rdx
+                        ; jne >no_overflow
+                        ; cmp rcx, -1i32
+                        ; jne >no_overflow
+                        ; xor eax, eax         // overflow: remainder = 0
+                        ; jmp =>done
+                        ;no_overflow:
+                        ; cqo
+                        ; idiv rcx
+                        ; movsxd rax, edx      // sign-extend 32-bit remainder
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+                Instruction::Remuw { rd, rs1, rs2 } => {
+                    let rs1_off = (rs1 * 8) as i32;
+                    let rs2_off = (rs2 * 8) as i32;
+                    let rd_off  = (rd  * 8) as i32;
+                    let done    = ops.new_dynamic_label();
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov eax, DWORD [r15 + rs1_off]
+                        ; mov ecx, DWORD [r15 + rs2_off]
+                        ; test ecx, ecx
+                        ; jnz >not_zero
+                        ; movsxd rax, eax      // div-by-zero: remainder = dividend sign-extended
+                        ; jmp =>done
+                        ;not_zero:
+                        ; xor edx, edx
+                        ; div ecx
+                        ; movsxd rax, edx
+                        ; =>done
+                    );
+                    if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
+                }
+
                 // Everything else: slow path (end block)
                 _ => {
                     emit_slow_path(&mut ops);
@@ -720,5 +971,39 @@ mod tests {
 
         assert_eq!(cpu.regs[1], 0x0000_1000);
         assert_eq!(next_pc, u64::MAX, "ECALL after LUI should trigger slow path");
+    }
+
+    // MUL x3, x1, x2  = funct7=1, rs2=2, rs1=1, funct3=0, rd=3, opcode=0x33
+    // = (1<<25)|(2<<20)|(1<<15)|(0<<12)|(3<<7)|0x33 = 0x022081B3
+    #[test]
+    fn jit_mul() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 6;
+        cpu.regs[2] = 7;
+        cpu.bus.store(ram,     4, 0x022081B3u64).unwrap();
+        cpu.bus.store(ram + 4, 4, 0x00000073u64).unwrap();
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+        let f = jit.get(ram).unwrap();
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], 42);
+    }
+
+    // DIV x3, x1, x2  = funct7=1, rs2=2, rs1=1, funct3=4, rd=3, opcode=0x33
+    // = (1<<25)|(2<<20)|(1<<15)|(4<<12)|(3<<7)|0x33 = 0x0220C1B3
+    #[test]
+    fn jit_div() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 84;
+        cpu.regs[2] = 2;
+        cpu.bus.store(ram,     4, 0x0220C1B3u64).unwrap();
+        cpu.bus.store(ram + 4, 4, 0x00000073u64).unwrap();
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+        let f = jit.get(ram).unwrap();
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], 42);
     }
 }
