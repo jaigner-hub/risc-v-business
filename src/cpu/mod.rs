@@ -77,9 +77,11 @@ impl Cpu {
     }
 
     pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
-        // Delegate to S-mode only if the trap originates from a less-privileged mode (U-mode).
-        // Per Priv §3.1.8, traps from S- or M-mode are never delegated to S-mode.
-        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode == PrivMode::U {
+        // Delegate to S-mode when medeleg[cause] is set and the trap did not originate in M-mode.
+        // Per Priv §3.1.8: a trap is taken in S-mode iff (a) it did not originate in M-mode,
+        // (b) medeleg[cause]=1, and (c) current mode is less privileged than M-mode (U or S).
+        // Traps from M-mode are never delegated downward.
+        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode != PrivMode::M {
             self.csr.s_trap_entry(self.mode == PrivMode::S);
             self.csr.sepc   = self.pc;
             self.csr.scause = cause;
@@ -238,16 +240,19 @@ mod tests {
     }
 
     #[test]
-    fn deliver_trap_s_mode_not_delegated_to_itself() {
-        // S-mode traps are never delegated to S-mode, even if medeleg has the bit.
-        // Priv §3.1.8: delegation only applies when trap originates below S-mode.
+    fn deliver_trap_s_mode_delegated_via_medeleg() {
+        // Per Priv §3.1.8: traps from S-mode with medeleg[cause]=1 are handled by stvec.
+        // S-mode is less privileged than M-mode, so delegation applies (mode != M).
         let mut c = cpu();
-        c.csr.mtvec  = 0x8000_0100;
-        c.csr.medeleg = 1 << 9; // ecall from S-mode
+        c.csr.stvec   = 0x8000_0200;
+        c.csr.mtvec   = 0x8000_0100;
+        c.csr.medeleg = 1 << 9; // delegate S-mode ecall (cause=9) to S-mode
         c.mode = PrivMode::S;
         c.deliver_trap(9, 0);
-        assert_eq!(c.csr.mcause, 9);
-        assert_eq!(c.pc, 0x8000_0100);
-        assert_eq!(c.mode, PrivMode::M);
+        // Should go to stvec, not mtvec, since medeleg[9]=1 and current mode != M
+        assert_eq!(c.csr.scause, 9);
+        assert_eq!(c.pc, 0x8000_0200);
+        assert_eq!(c.mode, PrivMode::S);
+        assert_eq!(c.csr.mcause, 0); // M-mode registers untouched
     }
 }
