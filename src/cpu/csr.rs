@@ -90,11 +90,13 @@ impl Csr {
         (self.mstatus >> 3) & 1
     }
 
-    pub fn trap_entry(&mut self) {
+    /// Call on M-mode trap entry. Saves MIE→MPIE, clears MIE, sets MPP to previous mode.
+    /// Per Priv §3.1.7: MPP is written with the privilege mode at the time of the trap.
+    pub fn trap_entry(&mut self, prev_mode: u64) {
         let mie = self.mie_bit();
         self.mstatus = (self.mstatus & !0x1888u64) // clear MIE[3], MPIE[7], MPP[12:11]
             | (mie << 7)                           // MPIE ← MIE
-            | (3u64 << 11);                        // MPP ← M-mode
+            | (prev_mode << 11);                   // MPP ← previous privilege mode
     }
 
     pub fn mret(&mut self) {
@@ -203,8 +205,8 @@ mod tests {
         // Set MIE=1 (bit 3)
         csr.mstatus = 0b1000; // MIE=1
         assert_eq!(csr.mie_bit(), 1);
-        // Simulate trap entry: MPIE←MIE, MIE←0, MPP←3
-        csr.trap_entry();
+        // Simulate trap entry from M-mode: MPIE←MIE, MIE←0, MPP←prev_mode(3=M)
+        csr.trap_entry(3);
         assert_eq!(csr.mie_bit(), 0);           // MIE cleared
         assert_eq!((csr.mstatus >> 7) & 1, 1);  // MPIE = previous MIE
         assert_eq!((csr.mstatus >> 11) & 3, 3); // MPP = M-mode

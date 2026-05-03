@@ -120,7 +120,8 @@ pub enum Instruction {
     Ebreak,  // opcode 0x73, imm=1
     Mret,    // opcode 0x73, imm=0x302 — return from M-mode trap
     Sret,    // opcode 0x73, imm=0x102 — return from S-mode trap (TSR-conditional)
-    Wfi,     // opcode 0x73, imm=0x105 — wait for interrupt (NOP for now)
+    Wfi,         // opcode 0x73, imm=0x105 — wait for interrupt (NOP for now)
+    SfenceVma,   // opcode 0x73, funct7=0x09 — TLB shootdown (Priv §4.2.1)
     // --- Zicsr extension (RV CSR access) ---
     // Spec: Unprivileged §9. csr is the 12-bit CSR address (bits[31:20]).
     // The *I variants use a 5-bit unsigned immediate from rs1 field (zero-extended).
@@ -334,6 +335,8 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                     (0x102, 0, 0) => Ok(Instruction::Sret),
                     (0x302, 0, 0) => Ok(Instruction::Mret),
                     (0x105, 0, 0) => Ok(Instruction::Wfi),
+                    // SFENCE.VMA: funct7=0x09, rd must be x0, rs1/rs2 are hints. Priv §4.2.1.
+                    (c, _, 0) if c >> 5 == 0x09 => Ok(Instruction::SfenceVma),
                     _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
                 },
                 0x1 => Ok(Instruction::Csrrw  { rd, rs1, csr }),

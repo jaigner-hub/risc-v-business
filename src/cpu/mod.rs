@@ -92,7 +92,7 @@ impl Cpu {
             self.pc  = self.csr.stvec & !0b11;
             self.mode = PrivMode::S;
         } else {
-            self.csr.trap_entry();
+            self.csr.trap_entry(self.mode as u64);
             self.csr.mepc   = self.pc;
             self.csr.mcause = cause;
             self.csr.mtval  = tval;
