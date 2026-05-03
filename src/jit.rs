@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::mem::offset_of;
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, AssemblyOffset, ExecutableBuffer, x64::Assembler};
 use crate::cpu::decode::{decode, Instruction};
+use crate::cpu::mmu::AccessType;
 use crate::cpu::Cpu;
 
 /// Signature of every compiled basic block.
@@ -22,7 +24,10 @@ pub struct JitCache {
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_load8(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    cpu.bus.load(addr, 1).unwrap_or(u64::MAX)
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Load) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    cpu.bus.load(pa, 1).unwrap_or(u64::MAX)
 }
 
 /// Load 2 bytes (zero-extended to u64). Returns u64::MAX on fault.
@@ -34,7 +39,10 @@ pub unsafe extern "sysv64" fn jit_load8(cpu: *mut Cpu, addr: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_load16(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    cpu.bus.load(addr, 2).unwrap_or(u64::MAX)
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Load) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    cpu.bus.load(pa, 2).unwrap_or(u64::MAX)
 }
 
 /// Load 4 bytes (zero-extended to u64). Returns u64::MAX on fault.
@@ -46,7 +54,10 @@ pub unsafe extern "sysv64" fn jit_load16(cpu: *mut Cpu, addr: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_load32(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    cpu.bus.load(addr, 4).unwrap_or(u64::MAX)
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Load) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    cpu.bus.load(pa, 4).unwrap_or(u64::MAX)
 }
 
 /// Load 8 bytes. Returns u64::MAX on fault.
@@ -58,7 +69,10 @@ pub unsafe extern "sysv64" fn jit_load32(cpu: *mut Cpu, addr: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_load64(cpu: *mut Cpu, addr: u64) -> u64 {
     let cpu = &mut *cpu;
-    cpu.bus.load(addr, 8).unwrap_or(u64::MAX)
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Load) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    cpu.bus.load(pa, 8).unwrap_or(u64::MAX)
 }
 
 /// Store 1 byte. Returns 0 on success, u64::MAX on fault.
@@ -70,10 +84,10 @@ pub unsafe extern "sysv64" fn jit_load64(cpu: *mut Cpu, addr: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_store8(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(addr, 1, val) {
-        Ok(_)  => 0,
-        Err(_) => u64::MAX,
-    }
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Store) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    match cpu.bus.store(pa, 1, val) { Ok(_) => 0, Err(_) => u64::MAX }
 }
 
 /// Store 2 bytes. Returns 0 on success, u64::MAX on fault.
@@ -85,10 +99,10 @@ pub unsafe extern "sysv64" fn jit_store8(cpu: *mut Cpu, addr: u64, val: u64) -> 
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_store16(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(addr, 2, val) {
-        Ok(_)  => 0,
-        Err(_) => u64::MAX,
-    }
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Store) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    match cpu.bus.store(pa, 2, val) { Ok(_) => 0, Err(_) => u64::MAX }
 }
 
 /// Store 4 bytes. Returns 0 on success, u64::MAX on fault.
@@ -100,10 +114,10 @@ pub unsafe extern "sysv64" fn jit_store16(cpu: *mut Cpu, addr: u64, val: u64) ->
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_store32(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(addr, 4, val) {
-        Ok(_)  => 0,
-        Err(_) => u64::MAX,
-    }
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Store) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    match cpu.bus.store(pa, 4, val) { Ok(_) => 0, Err(_) => u64::MAX }
 }
 
 /// Store 8 bytes. Returns 0 on success, u64::MAX on fault.
@@ -115,10 +129,10 @@ pub unsafe extern "sysv64" fn jit_store32(cpu: *mut Cpu, addr: u64, val: u64) ->
 #[no_mangle]
 pub unsafe extern "sysv64" fn jit_store64(cpu: *mut Cpu, addr: u64, val: u64) -> u64 {
     let cpu = &mut *cpu;
-    match cpu.bus.store(addr, 8, val) {
-        Ok(_)  => 0,
-        Err(_) => u64::MAX,
-    }
+    let pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, addr, AccessType::Store) {
+        Ok(pa) => pa, Err(_) => return u64::MAX,
+    };
+    match cpu.bus.store(pa, 8, val) { Ok(_) => 0, Err(_) => u64::MAX }
 }
 
 type JitLoadFn  = unsafe extern "sysv64" fn(*mut Cpu, u64) -> u64;
@@ -180,12 +194,31 @@ fn emit_slow_path(ops: &mut Assembler) {
     );
 }
 
+// Like emit_slow_path but also writes `fault_pc` into cpu.pc (r14 points to Cpu) so
+// that the main loop's cpu.step() executes the correct faulting instruction, not the
+// block's start PC. Used by load/store callout fault paths where inst_count > 0.
+fn emit_fault_return(ops: &mut Assembler, fault_pc: u64) {
+    let pc_offset = offset_of!(Cpu, pc) as i32;
+    let pc_val    = fault_pc as i64;
+    dynasm!(ops
+        ; .arch x64
+        ; mov rax, QWORD pc_val
+        ; mov QWORD [r14 + pc_offset], rax  // cpu.pc = fault_pc
+        ; add rsp, 8
+        ; pop r14
+        ; pop r15
+        ; mov rax, QWORD -1i64              // u64::MAX: call cpu.step() in main loop
+        ; ret
+    );
+}
+
 fn emit_load(
     ops: &mut Assembler,
     rd: usize,
     rs1: usize,
     imm: i64,
     helper: unsafe extern "sysv64" fn(*mut Cpu, u64) -> u64,
+    guest_pc: u64,
 ) {
     let rs1_off = (rs1 * 8) as i32;
     let rd_off  = (rd  * 8) as i32;
@@ -211,7 +244,7 @@ fn emit_load(
         ; jmp =>skip_fault
         ; =>fault_label
     );
-    emit_slow_path(ops);
+    emit_fault_return(ops, guest_pc);
     dynasm!(ops ; .arch x64 ; =>skip_fault);
 }
 
@@ -221,6 +254,7 @@ fn emit_store(
     rs2: usize,
     imm: i64,
     helper: unsafe extern "sysv64" fn(*mut Cpu, u64, u64) -> u64,
+    guest_pc: u64,
 ) {
     let rs1_off = (rs1 * 8) as i32;
     let rs2_off = (rs2 * 8) as i32;
@@ -244,7 +278,7 @@ fn emit_store(
         ; jmp =>skip_fault
         ; =>fault_label
     );
-    emit_slow_path(ops);
+    emit_fault_return(ops, guest_pc);
     dynasm!(ops ; .arch x64 ; =>skip_fault);
 }
 
@@ -321,6 +355,13 @@ impl JitCache {
     pub fn compile(&mut self, cpu: &mut Cpu, start_pc: u64) {
         if self.blocks.contains_key(&start_pc) { return; }
 
+        // Translate start_pc before fetching the first instruction. In M-mode or with
+        // satp.MODE=0 this is a passthrough. Returns early if the VA is unmapped.
+        let start_pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, start_pc, AccessType::Fetch) {
+            Ok(pa) => pa, Err(_) => return,
+        };
+        if cpu.bus.load(start_pa, 4).is_err() { return; }
+
         let mut ops = Assembler::new().unwrap();
         let entry: AssemblyOffset = ops.offset();
         emit_prologue(&mut ops);
@@ -329,18 +370,31 @@ impl JitCache {
         let mut inst_count = 0u32;
 
         loop {
-            // Fetch 4 bytes. RVC blocks start with the low 2 bytes having bits[1:0] != 0b11.
-            let raw4 = match cpu.bus.load(guest_pc, 4) {
+            macro_rules! block_exit {
+                () => {
+                    if inst_count > 0 {
+                        emit_return(&mut ops, guest_pc);
+                    } else {
+                        emit_slow_path(&mut ops);
+                    }
+                };
+            }
+
+            let inst_pa = match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, cpu.mode, cpu.csr.mstatus, guest_pc, AccessType::Fetch) {
+                Ok(pa) => pa,
+                Err(_) => { block_exit!(); break; }
+            };
+            let raw4 = match cpu.bus.load(inst_pa, 4) {
                 Ok(v)  => v as u32,
-                Err(_) => { emit_slow_path(&mut ops); break; }
+                Err(_) => { block_exit!(); break; }
             };
 
             // RVC (16-bit): all fall to slow path in Phase 6a.
-            if raw4 & 0x3 != 0x3 { emit_slow_path(&mut ops); break; }
+            if raw4 & 0x3 != 0x3 { block_exit!(); break; }
 
             let (inst, inst_size): (Instruction, u64) = match decode(raw4) {
                 Ok(i)  => (i, 4),
-                Err(_) => { emit_slow_path(&mut ops); break; }
+                Err(_) => { block_exit!(); break; }
             };
 
             let next_seq = guest_pc.wrapping_add(inst_size);
@@ -686,7 +740,7 @@ impl JitCache {
                     if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
                 }
                 Instruction::Mulhsu { .. } => {
-                    emit_slow_path(&mut ops);
+                    block_exit!();
                     break;
                 }
                 Instruction::Mulw { rd, rs1, rs2 } => {
@@ -906,7 +960,7 @@ impl JitCache {
 
                 // ── Loads ──────────────────────────────────────────────────────
                 Instruction::Lb { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8, guest_pc);
                     if rd != 0 {
                         let rd_off = (rd * 8) as i32;
                         dynasm!(ops ; .arch x64
@@ -916,7 +970,7 @@ impl JitCache {
                     }
                 }
                 Instruction::Lh { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16, guest_pc);
                     if rd != 0 {
                         let rd_off = (rd * 8) as i32;
                         dynasm!(ops ; .arch x64
@@ -926,7 +980,7 @@ impl JitCache {
                     }
                 }
                 Instruction::Lw { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32, guest_pc);
                     if rd != 0 {
                         let rd_off = (rd * 8) as i32;
                         dynasm!(ops ; .arch x64
@@ -936,30 +990,30 @@ impl JitCache {
                     }
                 }
                 Instruction::Ld { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load64);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load64, guest_pc);
                 }
                 Instruction::Lbu { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8, guest_pc);
                 }
                 Instruction::Lhu { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16, guest_pc);
                 }
                 Instruction::Lwu { rd, rs1, imm } => {
-                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32);
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32, guest_pc);
                 }
 
                 // ── Stores ─────────────────────────────────────────────────────
                 Instruction::Sb { rs1, rs2, imm } => {
-                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store8);
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store8, guest_pc);
                 }
                 Instruction::Sh { rs1, rs2, imm } => {
-                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store16);
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store16, guest_pc);
                 }
                 Instruction::Sw { rs1, rs2, imm } => {
-                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store32);
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store32, guest_pc);
                 }
                 Instruction::Sd { rs1, rs2, imm } => {
-                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store64);
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store64, guest_pc);
                 }
 
                 // ── Conditional branches (end block) ──────────────────────────
@@ -993,6 +1047,7 @@ impl JitCache {
                     // Taken path
                     dynasm!(ops ; .arch x64 ; =>taken_lbl);
                     emit_return(&mut ops, taken_pc as u64);
+                    inst_count += 1;
                     break;
                 }
 
@@ -1009,6 +1064,7 @@ impl JitCache {
                         );
                     }
                     emit_return(&mut ops, target_pc as u64);
+                    inst_count += 1;
                     break;
                 }
 
@@ -1043,12 +1099,13 @@ impl JitCache {
                         ; mov rax, rcx
                         ; ret
                     );
+                    inst_count += 1;
                     break;
                 }
 
                 // Everything else: slow path (end block)
                 _ => {
-                    emit_slow_path(&mut ops);
+                    block_exit!();
                     break;
                 }
             }
@@ -1061,9 +1118,15 @@ impl JitCache {
             }
         }
 
-        let buf = ops.finalize().unwrap();
-        let fn_ptr: JitFn = unsafe { std::mem::transmute(buf.ptr(entry)) };
-        self.blocks.insert(start_pc, (buf, fn_ptr));
+        // Only cache blocks that compiled at least one instruction. Blocks that
+        // immediately slow-path (inst_count == 0) are not worth caching — kernel
+        // VAs after paging is enabled always fail bus.load() and would flood the
+        // HashMap with do-nothing stubs, adding lookup overhead for every step.
+        if inst_count > 0 {
+            let buf = ops.finalize().unwrap();
+            let fn_ptr: JitFn = unsafe { std::mem::transmute(buf.ptr(entry)) };
+            self.blocks.insert(start_pc, (buf, fn_ptr));
+        }
     }
 }
 
@@ -1142,7 +1205,9 @@ mod tests {
         let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
 
         assert_eq!(cpu.regs[1], 42, "x1 should be 42 after ADDI");
-        assert_eq!(next_pc, u64::MAX, "ECALL should trigger slow path");
+        // ECALL follows a handled instruction: block ends cleanly at ECALL's addr.
+        // The main loop calls cpu.step() from there to handle the slow-path opcode.
+        assert_eq!(next_pc, ram + 4, "block should return ECALL addr for main-loop dispatch");
     }
 
     // ADD x3, x1, x2 = 0x002081B3
@@ -1162,7 +1227,7 @@ mod tests {
         let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
 
         assert_eq!(cpu.regs[3], 42);
-        assert_eq!(next_pc, u64::MAX);
+        assert_eq!(next_pc, ram + 4, "block should return ECALL addr for main-loop dispatch");
     }
 
     // LUI x1, 1 = 0x000010B7  →  x1 = 0x0000_1000
@@ -1180,7 +1245,7 @@ mod tests {
         let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
 
         assert_eq!(cpu.regs[1], 0x0000_1000);
-        assert_eq!(next_pc, u64::MAX, "ECALL after LUI should trigger slow path");
+        assert_eq!(next_pc, ram + 4, "block should return ECALL addr for main-loop dispatch");
     }
 
     // MUL x3, x1, x2  = funct7=1, rs2=2, rs1=1, funct3=0, rd=3, opcode=0x33
@@ -1299,7 +1364,7 @@ mod tests {
 
         // LW sign-extends 32 bits; DEAD_BEEF = 0xDEAD_BEEF which sign-extended is 0xFFFF_FFFF_DEAD_BEEF
         assert_eq!(cpu.regs[3], 0xFFFF_FFFF_DEAD_BEEFu64);
-        assert_eq!(next_pc, u64::MAX);
+        assert_eq!(next_pc, ram + 8, "block should return ECALL addr for main-loop dispatch");
     }
 
     // LW x2, 0(x1) encoding: imm=0, rs1=1, funct3=2, rd=2, opcode=0x03
@@ -1372,8 +1437,8 @@ mod tests {
         let mut jit = JitCache::new();
         jit.compile(&mut cpu, ram);
 
-        let f = jit.get(ram).unwrap();
-        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
-        assert_eq!(next_pc, u64::MAX, "CSR instruction should trigger slow path");
+        // Blocks whose first instruction is unhandled compile to nothing and are
+        // not cached. The main loop's None branch handles them via cpu.step().
+        assert!(jit.get(ram).is_none(), "pure slow-path block must not be cached");
     }
 }

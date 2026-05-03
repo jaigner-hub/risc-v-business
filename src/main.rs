@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use riscv_emu::{cpu::Cpu, dtb, dtb::INITRD_BASE, loader};
+use riscv_emu::{cpu::{Cpu, PrivMode}, dtb, dtb::INITRD_BASE, loader};
 use std::sync::mpsc;
 
 #[derive(Parser)]
@@ -75,18 +75,51 @@ fn main() -> Result<()> {
     }
 
     // Stdin reader thread feeds bytes into the UART RX buffer.
+    // Filters ANSI CPR sequences (\033[<digits>;<digits>R) which the host terminal
+    // sends in response to our \033[6n cursor-position query; the emulator already
+    // injects a synthetic \033[1;1R, so the real host response must be discarded.
+    // Other ESC sequences (arrow keys, function keys) are buffered until we know
+    // whether they're CPR, then replayed if they're not.
     let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
     std::thread::spawn(move || {
         use std::io::Read;
         let stdin = std::io::stdin();
         let mut buf = [0u8; 64];
+        let mut esc_buf: Vec<u8> = Vec::new();
         loop {
             match stdin.lock().read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     for &b in &buf[..n] {
-                        if stdin_tx.send(b).is_err() {
-                            return;
+                        if esc_buf.is_empty() {
+                            if b == 0x1B {
+                                esc_buf.push(b);
+                            } else if stdin_tx.send(b).is_err() {
+                                return;
+                            }
+                        } else {
+                            match esc_buf.len() {
+                                1 => {
+                                    if b == b'[' {
+                                        esc_buf.push(b);
+                                    } else {
+                                        for &c in &esc_buf { let _ = stdin_tx.send(c); }
+                                        esc_buf.clear();
+                                        if stdin_tx.send(b).is_err() { return; }
+                                    }
+                                },
+                                _ => {
+                                    if b.is_ascii_digit() || b == b';' {
+                                        esc_buf.push(b);
+                                    } else if b == b'R' && esc_buf.len() >= 3 {
+                                        esc_buf.clear();
+                                    } else {
+                                        for &c in &esc_buf { let _ = stdin_tx.send(c); }
+                                        esc_buf.clear();
+                                        if stdin_tx.send(b).is_err() { return; }
+                                    }
+                                },
+                            }
                         }
                     }
                 }
@@ -99,28 +132,39 @@ fn main() -> Result<()> {
     let mut tick: u64 = 0;
 
     loop {
-        match jit.get(cpu.pc) {
+        // Scale tick by estimated instructions per JIT block so CLINT fires every
+        // ~1024 guest instructions regardless of privilege mode:
+        //   M-mode JIT blocks: up to 64 instructions → tick += 64 → fires every 16 blocks
+        //   S/U-mode JIT blocks: ~8 instructions avg  → tick += 8  → fires every 128 blocks
+        //   Interpreter step: 1 instruction            → tick += 1  → fires every 1024 steps
+        let tick_inc = match jit.get(cpu.pc) {
             Some(f) => {
+                let mode = cpu.mode;
                 let next = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
                 if next == u64::MAX {
                     cpu.step()?;
+                    1
                 } else {
                     cpu.pc = next;
+                    if mode == PrivMode::M { 64 } else { 8 }
                 }
             }
             None => {
                 let pc = cpu.pc;
                 cpu.step()?;
-                jit.compile(&mut cpu, pc);
+                if !cpu.jit_invalidate {
+                    jit.compile(&mut cpu, pc);
+                }
+                1
             }
-        }
+        };
 
         if cpu.jit_invalidate {
             cpu.jit_invalidate = false;
             jit.invalidate();
         }
 
-        tick = tick.wrapping_add(1);
+        tick = tick.wrapping_add(tick_inc);
         if tick & 1023 == 0 {
             // Drain stdin → UART RX only after the shell prompt is ready.
             if cpu.bus.uart.stdin_ready {

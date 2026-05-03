@@ -10,6 +10,98 @@ fn sext(val: u64, bit: u32) -> u64 {
     (((val << shift) as i64) >> shift) as u64
 }
 
+// NaN-boxing: single-precision values in 64-bit FP registers have upper 32 bits = 0xFFFFFFFF.
+// If upper 32 bits are not all-1, the register holds an invalid value → read as canonical NaN.
+const CANONICAL_NAN_S: u64 = 0xFFFF_FFFF_7FC0_0000; // NaN-boxed canonical quiet NaN
+const CANONICAL_NAN_D: u64 = 0x7FF8_0000_0000_0000;
+
+#[inline(always)] fn freg_f32(v: u64) -> f32 {
+    if v >> 32 != 0xFFFF_FFFF { f32::from_bits(0x7FC0_0000) }
+    else { f32::from_bits(v as u32) }
+}
+#[inline(always)] fn f32_to_freg(v: f32) -> u64 { 0xFFFF_FFFF_0000_0000 | v.to_bits() as u64 }
+#[inline(always)] fn freg_f64(v: u64) -> f64  { f64::from_bits(v) }
+#[inline(always)] fn f64_to_freg(v: f64) -> u64 { v.to_bits() }
+
+fn fclass_s(v: f32) -> u64 {
+    let bits = v.to_bits();
+    let sign = bits >> 31;
+    let exp  = (bits >> 23) & 0xFF;
+    let mant = bits & 0x7F_FFFF;
+    if exp == 0xFF && mant != 0 {
+        if mant & 0x40_0000 != 0 { 1 << 9 } else { 1 << 8 } // qNaN / sNaN
+    } else if exp == 0xFF { if sign != 0 { 1 << 0 } else { 1 << 7 } } // ±inf
+    else if exp == 0 && mant == 0 { if sign != 0 { 1 << 3 } else { 1 << 4 } } // ±zero
+    else if exp == 0 { if sign != 0 { 1 << 2 } else { 1 << 5 } } // ±subnormal
+    else if sign != 0 { 1 << 1 } else { 1 << 6 } // ±normal
+}
+
+fn fclass_d(v: f64) -> u64 {
+    let bits = v.to_bits();
+    let sign = bits >> 63;
+    let exp  = (bits >> 52) & 0x7FF;
+    let mant = bits & 0x000F_FFFF_FFFF_FFFF;
+    if exp == 0x7FF && mant != 0 {
+        if mant & 0x0008_0000_0000_0000 != 0 { 1 << 9 } else { 1 << 8 }
+    } else if exp == 0x7FF { if sign != 0 { 1 << 0 } else { 1 << 7 } }
+    else if exp == 0 && mant == 0 { if sign != 0 { 1 << 3 } else { 1 << 4 } }
+    else if exp == 0 { if sign != 0 { 1 << 2 } else { 1 << 5 } }
+    else if sign != 0 { 1 << 1 } else { 1 << 6 }
+}
+
+// RISC-V min/max: if one operand is NaN, return the other; if both NaN, return canonical qNaN.
+#[inline(always)] fn fp_min_s(a: f32, b: f32) -> f32 {
+    if a.is_nan() { b } else if b.is_nan() { a } else if a <= b { a } else { b }
+}
+#[inline(always)] fn fp_max_s(a: f32, b: f32) -> f32 {
+    if a.is_nan() { b } else if b.is_nan() { a } else if a >= b { a } else { b }
+}
+#[inline(always)] fn fp_min_d(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a } else if a <= b { a } else { b }
+}
+#[inline(always)] fn fp_max_d(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a } else if a >= b { a } else { b }
+}
+
+// Float→int saturating conversions per RISC-V spec §11.6 / §12.4.
+// Out-of-range or NaN → saturate to type boundary.
+#[inline(always)] fn fcvt_w_s(v: f32)  -> u64 {
+    if v.is_nan() || v >= 2147483648.0f32  { 0x7FFF_FFFFu64 }
+    else if v < -2147483648.0f32 { 0xFFFF_FFFF_8000_0000u64 }
+    else { (v as i32) as i64 as u64 }
+}
+#[inline(always)] fn fcvt_wu_s(v: f32) -> u64 {
+    if v.is_nan() || v >= 4294967296.0f32 { 0xFFFF_FFFFu64 }
+    else if v < 0.0 { 0u64 } else { (v as u32) as u64 }
+}
+#[inline(always)] fn fcvt_l_s(v: f32) -> u64 {
+    if v.is_nan() || v >= 9.223372036854776e18f32  { i64::MAX as u64 }
+    else if v < -9.223372036854776e18f32 { i64::MIN as u64 }
+    else { (v as i64) as u64 }
+}
+#[inline(always)] fn fcvt_lu_s(v: f32) -> u64 {
+    if v.is_nan() || v >= 1.8446744073709552e19f32 { u64::MAX }
+    else if v < 0.0 { 0u64 } else { v as u64 }
+}
+#[inline(always)] fn fcvt_w_d(v: f64) -> u64 {
+    if v.is_nan() || v >= 2147483648.0f64  { 0x7FFF_FFFFu64 }
+    else if v < -2147483648.0f64 { 0xFFFF_FFFF_8000_0000u64 }
+    else { (v as i32) as i64 as u64 }
+}
+#[inline(always)] fn fcvt_wu_d(v: f64) -> u64 {
+    if v.is_nan() || v >= 4294967296.0f64 { 0xFFFF_FFFFu64 }
+    else if v < 0.0 { 0u64 } else { (v as u32) as u64 }
+}
+#[inline(always)] fn fcvt_l_d(v: f64) -> u64 {
+    if v.is_nan() || v >= 9.223372036854776e18f64  { i64::MAX as u64 }
+    else if v < -9.223372036854776e18f64 { i64::MIN as u64 }
+    else { (v as i64) as u64 }
+}
+#[inline(always)] fn fcvt_lu_d(v: f64) -> u64 {
+    if v.is_nan() || v >= 1.8446744073709552e19f64 { u64::MAX }
+    else if v < 0.0 { 0u64 } else { v as u64 }
+}
+
 pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     let pc = cpu.pc;
 
@@ -247,7 +339,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.fregs[fd] = v, // store as zero-extended u64 (low 32 bits)
+                    Ok(v)  => cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000u64 | (v & 0xFFFF_FFFF),
                 }
             }
         },
@@ -809,6 +901,160 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                     cpu.set_reg(rd, old);
                 }
             }
+        },
+
+        // --- F/D extension arithmetic (OP-FP: opcode 0x53) ---
+        // Spec: Unprivileged §11.6 (F), §12.4 (D).
+        // Bit moves (no NaN-boxing check on read, no conversion)
+        Instruction::FmvXW { rd, rs1 }  => { cpu.set_reg(rd, sext(cpu.fregs[rs1] & 0xFFFF_FFFF, 31)); },
+        Instruction::FmvXD { rd, rs1 }  => { cpu.set_reg(rd, cpu.fregs[rs1]); },
+        Instruction::FmvWX { rd, rs1 }  => { cpu.fregs[rd] = f32_to_freg(f32::from_bits(cpu.reg(rs1) as u32)); },
+        Instruction::FmvDX { rd, rs1 }  => { cpu.fregs[rd] = cpu.reg(rs1); },
+        Instruction::FclassS { rd, rs1 } => { cpu.set_reg(rd, fclass_s(freg_f32(cpu.fregs[rs1]))); },
+        Instruction::FclassD { rd, rs1 } => { cpu.set_reg(rd, fclass_d(freg_f64(cpu.fregs[rs1]))); },
+
+        // Sign injection
+        Instruction::FsgnjS  { rd, rs1, rs2 } => {
+            let v = (freg_f32(cpu.fregs[rs1]).to_bits() & 0x7FFF_FFFF) | (freg_f32(cpu.fregs[rs2]).to_bits() & 0x8000_0000);
+            cpu.fregs[rd] = f32_to_freg(f32::from_bits(v));
+        },
+        Instruction::FsgnjnS { rd, rs1, rs2 } => {
+            let v = (freg_f32(cpu.fregs[rs1]).to_bits() & 0x7FFF_FFFF) | (!freg_f32(cpu.fregs[rs2]).to_bits() & 0x8000_0000);
+            cpu.fregs[rd] = f32_to_freg(f32::from_bits(v));
+        },
+        Instruction::FsgnjxS { rd, rs1, rs2 } => {
+            let v = freg_f32(cpu.fregs[rs1]).to_bits() ^ (freg_f32(cpu.fregs[rs2]).to_bits() & 0x8000_0000);
+            cpu.fregs[rd] = f32_to_freg(f32::from_bits(v));
+        },
+        Instruction::FsgnjD  { rd, rs1, rs2 } => {
+            let v = (cpu.fregs[rs1] & 0x7FFF_FFFF_FFFF_FFFF) | (cpu.fregs[rs2] & 0x8000_0000_0000_0000);
+            cpu.fregs[rd] = v;
+        },
+        Instruction::FsgnjnD { rd, rs1, rs2 } => {
+            let v = (cpu.fregs[rs1] & 0x7FFF_FFFF_FFFF_FFFF) | (!cpu.fregs[rs2] & 0x8000_0000_0000_0000);
+            cpu.fregs[rd] = v;
+        },
+        Instruction::FsgnjxD { rd, rs1, rs2 } => {
+            let v = cpu.fregs[rs1] ^ (cpu.fregs[rs2] & 0x8000_0000_0000_0000);
+            cpu.fregs[rd] = v;
+        },
+
+        // Min/Max (RISC-V semantics: NaN-tolerant, return non-NaN operand)
+        Instruction::FminS { rd, rs1, rs2 } => {
+            let r = fp_min_s(freg_f32(cpu.fregs[rs1]), freg_f32(cpu.fregs[rs2]));
+            cpu.fregs[rd] = if r.is_nan() { CANONICAL_NAN_S } else { f32_to_freg(r) };
+        },
+        Instruction::FmaxS { rd, rs1, rs2 } => {
+            let r = fp_max_s(freg_f32(cpu.fregs[rs1]), freg_f32(cpu.fregs[rs2]));
+            cpu.fregs[rd] = if r.is_nan() { CANONICAL_NAN_S } else { f32_to_freg(r) };
+        },
+        Instruction::FminD { rd, rs1, rs2 } => {
+            let r = fp_min_d(freg_f64(cpu.fregs[rs1]), freg_f64(cpu.fregs[rs2]));
+            cpu.fregs[rd] = if r.is_nan() { CANONICAL_NAN_D } else { f64_to_freg(r) };
+        },
+        Instruction::FmaxD { rd, rs1, rs2 } => {
+            let r = fp_max_d(freg_f64(cpu.fregs[rs1]), freg_f64(cpu.fregs[rs2]));
+            cpu.fregs[rd] = if r.is_nan() { CANONICAL_NAN_D } else { f64_to_freg(r) };
+        },
+
+        // Comparisons → integer result (false if either operand is NaN, except FEQ where NaN→0)
+        Instruction::FleS { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f32(cpu.fregs[rs1]), freg_f32(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a <= b) as u64);
+        },
+        Instruction::FltS { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f32(cpu.fregs[rs1]), freg_f32(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a < b) as u64);
+        },
+        Instruction::FeqS { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f32(cpu.fregs[rs1]), freg_f32(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a == b) as u64);
+        },
+        Instruction::FleD { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f64(cpu.fregs[rs1]), freg_f64(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a <= b) as u64);
+        },
+        Instruction::FltD { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f64(cpu.fregs[rs1]), freg_f64(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a < b) as u64);
+        },
+        Instruction::FeqD { rd, rs1, rs2 } => {
+            let (a, b) = (freg_f64(cpu.fregs[rs1]), freg_f64(cpu.fregs[rs2]));
+            cpu.set_reg(rd, (!a.is_nan() && !b.is_nan() && a == b) as u64);
+        },
+
+        // Arithmetic — rm field ignored (Rust uses IEEE 754 round-to-nearest-even by default)
+        Instruction::FaddS  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f32_to_freg(freg_f32(cpu.fregs[rs1]) + freg_f32(cpu.fregs[rs2])); },
+        Instruction::FsubS  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f32_to_freg(freg_f32(cpu.fregs[rs1]) - freg_f32(cpu.fregs[rs2])); },
+        Instruction::FmulS  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f32_to_freg(freg_f32(cpu.fregs[rs1]) * freg_f32(cpu.fregs[rs2])); },
+        Instruction::FdivS  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f32_to_freg(freg_f32(cpu.fregs[rs1]) / freg_f32(cpu.fregs[rs2])); },
+        Instruction::FsqrtS { rd, rs1, ..      } => { cpu.fregs[rd] = f32_to_freg(freg_f32(cpu.fregs[rs1]).sqrt()); },
+        Instruction::FaddD  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f64_to_freg(freg_f64(cpu.fregs[rs1]) + freg_f64(cpu.fregs[rs2])); },
+        Instruction::FsubD  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f64_to_freg(freg_f64(cpu.fregs[rs1]) - freg_f64(cpu.fregs[rs2])); },
+        Instruction::FmulD  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f64_to_freg(freg_f64(cpu.fregs[rs1]) * freg_f64(cpu.fregs[rs2])); },
+        Instruction::FdivD  { rd, rs1, rs2, .. } => { cpu.fregs[rd] = f64_to_freg(freg_f64(cpu.fregs[rs1]) / freg_f64(cpu.fregs[rs2])); },
+        Instruction::FsqrtD { rd, rs1, ..      } => { cpu.fregs[rd] = f64_to_freg(freg_f64(cpu.fregs[rs1]).sqrt()); },
+
+        // Cross-precision conversions
+        Instruction::FcvtSD { rd, rs1, .. } => { cpu.fregs[rd] = f32_to_freg(freg_f64(cpu.fregs[rs1]) as f32); },
+        Instruction::FcvtDS { rd, rs1, .. } => { cpu.fregs[rd] = f64_to_freg(freg_f32(cpu.fregs[rs1]) as f64); },
+
+        // Float→int (saturating out-of-range, sign-extend W results to 64 bits)
+        Instruction::FcvtWS  { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_w_s(freg_f32(cpu.fregs[rs1]))); },
+        Instruction::FcvtWUS { rd, rs1, .. } => { cpu.set_reg(rd, sext(fcvt_wu_s(freg_f32(cpu.fregs[rs1])), 31)); },
+        Instruction::FcvtLS  { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_l_s(freg_f32(cpu.fregs[rs1]))); },
+        Instruction::FcvtLUS { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_lu_s(freg_f32(cpu.fregs[rs1]))); },
+        Instruction::FcvtWD  { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_w_d(freg_f64(cpu.fregs[rs1]))); },
+        Instruction::FcvtWUD { rd, rs1, .. } => { cpu.set_reg(rd, sext(fcvt_wu_d(freg_f64(cpu.fregs[rs1])), 31)); },
+        Instruction::FcvtLD  { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_l_d(freg_f64(cpu.fregs[rs1]))); },
+        Instruction::FcvtLUD { rd, rs1, .. } => { cpu.set_reg(rd, fcvt_lu_d(freg_f64(cpu.fregs[rs1]))); },
+
+        // Int→float
+        Instruction::FcvtSW  { rd, rs1, .. } => { cpu.fregs[rd] = f32_to_freg(cpu.reg(rs1) as i32 as f32); },
+        Instruction::FcvtSWU { rd, rs1, .. } => { cpu.fregs[rd] = f32_to_freg(cpu.reg(rs1) as u32 as f32); },
+        Instruction::FcvtSL  { rd, rs1, .. } => { cpu.fregs[rd] = f32_to_freg(cpu.reg(rs1) as i64 as f32); },
+        Instruction::FcvtSLU { rd, rs1, .. } => { cpu.fregs[rd] = f32_to_freg(cpu.reg(rs1) as f32); },
+        Instruction::FcvtDW  { rd, rs1, .. } => { cpu.fregs[rd] = f64_to_freg(cpu.reg(rs1) as i32 as f64); },
+        Instruction::FcvtDWU { rd, rs1, .. } => { cpu.fregs[rd] = f64_to_freg(cpu.reg(rs1) as u32 as f64); },
+        Instruction::FcvtDL  { rd, rs1, .. } => { cpu.fregs[rd] = f64_to_freg(cpu.reg(rs1) as i64 as f64); },
+        Instruction::FcvtDLU { rd, rs1, .. } => { cpu.fregs[rd] = f64_to_freg(cpu.reg(rs1) as f64); },
+
+        // Fused multiply-add (R4-type). Spec: §11.7 (F), §12.5 (D).
+        // FMA: rd = rs1*rs2 + rs3
+        // FMS: rd = rs1*rs2 - rs3
+        // FNMS: rd = -(rs1*rs2) + rs3   (negate product, add addend)
+        // FNMA: rd = -(rs1*rs2) - rs3   (negate product, subtract addend)
+        Instruction::FmaddS  { rd, rs1, rs2, rs3, .. } => {
+            let r = freg_f32(cpu.fregs[rs1]).mul_add(freg_f32(cpu.fregs[rs2]), freg_f32(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f32_to_freg(r);
+        },
+        Instruction::FmsubS  { rd, rs1, rs2, rs3, .. } => {
+            let r = freg_f32(cpu.fregs[rs1]).mul_add(freg_f32(cpu.fregs[rs2]), -freg_f32(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f32_to_freg(r);
+        },
+        Instruction::FnmsubS { rd, rs1, rs2, rs3, .. } => {
+            let r = (-freg_f32(cpu.fregs[rs1])).mul_add(freg_f32(cpu.fregs[rs2]), freg_f32(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f32_to_freg(r);
+        },
+        Instruction::FnmaddS { rd, rs1, rs2, rs3, .. } => {
+            let r = (-freg_f32(cpu.fregs[rs1])).mul_add(freg_f32(cpu.fregs[rs2]), -freg_f32(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f32_to_freg(r);
+        },
+        Instruction::FmaddD  { rd, rs1, rs2, rs3, .. } => {
+            let r = freg_f64(cpu.fregs[rs1]).mul_add(freg_f64(cpu.fregs[rs2]), freg_f64(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f64_to_freg(r);
+        },
+        Instruction::FmsubD  { rd, rs1, rs2, rs3, .. } => {
+            let r = freg_f64(cpu.fregs[rs1]).mul_add(freg_f64(cpu.fregs[rs2]), -freg_f64(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f64_to_freg(r);
+        },
+        Instruction::FnmsubD { rd, rs1, rs2, rs3, .. } => {
+            let r = (-freg_f64(cpu.fregs[rs1])).mul_add(freg_f64(cpu.fregs[rs2]), freg_f64(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f64_to_freg(r);
+        },
+        Instruction::FnmaddD { rd, rs1, rs2, rs3, .. } => {
+            let r = (-freg_f64(cpu.fregs[rs1])).mul_add(freg_f64(cpu.fregs[rs2]), -freg_f64(cpu.fregs[rs3]));
+            cpu.fregs[rd] = f64_to_freg(r);
         },
     }
 

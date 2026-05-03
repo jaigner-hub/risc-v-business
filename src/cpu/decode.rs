@@ -131,12 +131,82 @@ pub enum Instruction {
     Csrrwi { rd: usize, uimm: u32, csr: u16 },
     Csrrsi { rd: usize, uimm: u32, csr: u16 },
     Csrrci { rd: usize, uimm: u32, csr: u16 },
-    // --- F/D extension load/store (Phase 5 minimal: register save/restore only) ---
-    // Spec: Unprivileged §11 (F), §12 (D). No FP arithmetic implemented.
+    // --- F/D extension load/store ---
+    // Spec: Unprivileged §11 (F), §12 (D).
     Flw { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=010
     Fld { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=011
     Fsw { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=010
     Fsd { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=011
+    // --- F/D extension arithmetic (OP-FP: opcode 0x53) ---
+    // Spec: Unprivileged §11.6 (F), §12.4 (D)
+    // Bit moves between integer and FP register files
+    FmvXW   { rd: usize, rs1: usize },           // FMV.X.W funct7=0x70 rs2=0
+    FmvWX   { rd: usize, rs1: usize },           // FMV.W.X funct7=0x78 rs2=0
+    FmvXD   { rd: usize, rs1: usize },           // FMV.X.D funct7=0x71 rs2=0
+    FmvDX   { rd: usize, rs1: usize },           // FMV.D.X funct7=0x79 rs2=0
+    FclassS { rd: usize, rs1: usize },           // FCLASS.S funct7=0x70 rs2=1
+    FclassD { rd: usize, rs1: usize },           // FCLASS.D funct7=0x71 rs2=1
+    // Sign injection: rm field encodes variant (FSGNJ=0, FSGNJN=1, FSGNJX=2)
+    FsgnjS  { rd: usize, rs1: usize, rs2: usize },
+    FsgnjnS { rd: usize, rs1: usize, rs2: usize },
+    FsgnjxS { rd: usize, rs1: usize, rs2: usize },
+    FsgnjD  { rd: usize, rs1: usize, rs2: usize },
+    FsgnjnD { rd: usize, rs1: usize, rs2: usize },
+    FsgnjxD { rd: usize, rs1: usize, rs2: usize },
+    // Min/Max
+    FminS   { rd: usize, rs1: usize, rs2: usize },
+    FmaxS   { rd: usize, rs1: usize, rs2: usize },
+    FminD   { rd: usize, rs1: usize, rs2: usize },
+    FmaxD   { rd: usize, rs1: usize, rs2: usize },
+    // Comparisons (result goes to integer rd)
+    FleS    { rd: usize, rs1: usize, rs2: usize },
+    FltS    { rd: usize, rs1: usize, rs2: usize },
+    FeqS    { rd: usize, rs1: usize, rs2: usize },
+    FleD    { rd: usize, rs1: usize, rs2: usize },
+    FltD    { rd: usize, rs1: usize, rs2: usize },
+    FeqD    { rd: usize, rs1: usize, rs2: usize },
+    // Arithmetic (rm = rounding mode: 0=RNE 1=RTZ 2=RDN 3=RUP 4=RMM 7=DYN)
+    FaddS   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FsubS   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FmulS   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FdivS   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FsqrtS  { rd: usize, rs1: usize, rm: u8 },
+    FaddD   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FsubD   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FmulD   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FdivD   { rd: usize, rs1: usize, rs2: usize, rm: u8 },
+    FsqrtD  { rd: usize, rs1: usize, rm: u8 },
+    // Cross-precision conversions
+    FcvtSD  { rd: usize, rs1: usize, rm: u8 },  // FCVT.S.D
+    FcvtDS  { rd: usize, rs1: usize, rm: u8 },  // FCVT.D.S
+    // Float-to-int conversions (rs2 field encodes target integer type)
+    FcvtWS  { rd: usize, rs1: usize, rm: u8 },  // FCVT.W.S
+    FcvtWUS { rd: usize, rs1: usize, rm: u8 },  // FCVT.WU.S
+    FcvtLS  { rd: usize, rs1: usize, rm: u8 },  // FCVT.L.S  (RV64)
+    FcvtLUS { rd: usize, rs1: usize, rm: u8 },  // FCVT.LU.S (RV64)
+    FcvtWD  { rd: usize, rs1: usize, rm: u8 },  // FCVT.W.D
+    FcvtWUD { rd: usize, rs1: usize, rm: u8 },  // FCVT.WU.D
+    FcvtLD  { rd: usize, rs1: usize, rm: u8 },  // FCVT.L.D  (RV64)
+    FcvtLUD { rd: usize, rs1: usize, rm: u8 },  // FCVT.LU.D (RV64)
+    // Int-to-float conversions
+    FcvtSW  { rd: usize, rs1: usize, rm: u8 },  // FCVT.S.W
+    FcvtSWU { rd: usize, rs1: usize, rm: u8 },  // FCVT.S.WU
+    FcvtSL  { rd: usize, rs1: usize, rm: u8 },  // FCVT.S.L  (RV64)
+    FcvtSLU { rd: usize, rs1: usize, rm: u8 },  // FCVT.S.LU (RV64)
+    FcvtDW  { rd: usize, rs1: usize, rm: u8 },  // FCVT.D.W
+    FcvtDWU { rd: usize, rs1: usize, rm: u8 },  // FCVT.D.WU
+    FcvtDL  { rd: usize, rs1: usize, rm: u8 },  // FCVT.D.L  (RV64)
+    FcvtDLU { rd: usize, rs1: usize, rm: u8 },  // FCVT.D.LU (RV64)
+    // Fused multiply-add (R4-type: opcodes 0x43/0x47/0x4B/0x4F, fmt bit[26:25])
+    // Spec: Unprivileged §11.7 (F), §12.5 (D)
+    FmaddS  { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FmsubS  { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FnmsubS { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FnmaddS { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FmaddD  { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FmsubD  { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FnmsubD { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
+    FnmaddD { rd: usize, rs1: usize, rs2: usize, rs3: usize, rm: u8 },
 }
 
 /// Sign-extend the high 12 bits of inst (I-type immediate).
@@ -371,6 +441,108 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x5 => Ok(Instruction::Csrrwi { rd, uimm: rs1 as u32, csr }),
                 0x6 => Ok(Instruction::Csrrsi { rd, uimm: rs1 as u32, csr }),
                 0x7 => Ok(Instruction::Csrrci { rd, uimm: rs1 as u32, csr }),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+            }
+        },
+        // R4-type: Fused Multiply-Add (opcodes 0x43/0x47/0x4B/0x4F).
+        // Spec: Unprivileged §11.7 (F), §12.5 (D).
+        // inst[31:27]=rs3, inst[26:25]=fmt (0=S,1=D), inst[24:20]=rs2, inst[14:12]=rm.
+        0x43 | 0x47 | 0x4B | 0x4F => {
+            let rs3 = (funct7 >> 2) as usize;
+            let fmt = funct7 & 0x3;
+            let rm  = funct3 as u8;
+            match (opcode, fmt) {
+                (0x43, 0) => Ok(Instruction::FmaddS  { rd, rs1, rs2, rs3, rm }),
+                (0x43, 1) => Ok(Instruction::FmaddD  { rd, rs1, rs2, rs3, rm }),
+                (0x47, 0) => Ok(Instruction::FmsubS  { rd, rs1, rs2, rs3, rm }),
+                (0x47, 1) => Ok(Instruction::FmsubD  { rd, rs1, rs2, rs3, rm }),
+                (0x4B, 0) => Ok(Instruction::FnmsubS { rd, rs1, rs2, rs3, rm }),
+                (0x4B, 1) => Ok(Instruction::FnmsubD { rd, rs1, rs2, rs3, rm }),
+                (0x4F, 0) => Ok(Instruction::FnmaddS { rd, rs1, rs2, rs3, rm }),
+                (0x4F, 1) => Ok(Instruction::FnmaddD { rd, rs1, rs2, rs3, rm }),
+                _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+            }
+        },
+        // OP-FP: opcode 0x53. Spec: Unprivileged §11.6, §12.4.
+        // funct7 encodes op+fmt; funct3 is rounding mode (rm) or variant selector.
+        0x53 => {
+            let rm = funct3 as u8;
+            match (funct7, rs2) {
+                (0x00, _) => Ok(Instruction::FaddS  { rd, rs1, rs2, rm }),
+                (0x01, _) => Ok(Instruction::FaddD  { rd, rs1, rs2, rm }),
+                (0x04, _) => Ok(Instruction::FsubS  { rd, rs1, rs2, rm }),
+                (0x05, _) => Ok(Instruction::FsubD  { rd, rs1, rs2, rm }),
+                (0x08, _) => Ok(Instruction::FmulS  { rd, rs1, rs2, rm }),
+                (0x09, _) => Ok(Instruction::FmulD  { rd, rs1, rs2, rm }),
+                (0x0C, _) => Ok(Instruction::FdivS  { rd, rs1, rs2, rm }),
+                (0x0D, _) => Ok(Instruction::FdivD  { rd, rs1, rs2, rm }),
+                (0x2C, 0) => Ok(Instruction::FsqrtS { rd, rs1, rm }),
+                (0x2D, 0) => Ok(Instruction::FsqrtD { rd, rs1, rm }),
+                // Sign injection: rm field picks variant (0=FSGNJ, 1=FSGNJN, 2=FSGNJX)
+                (0x10, _) => match rm {
+                    0 => Ok(Instruction::FsgnjS  { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FsgnjnS { rd, rs1, rs2 }),
+                    2 => Ok(Instruction::FsgnjxS { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                (0x11, _) => match rm {
+                    0 => Ok(Instruction::FsgnjD  { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FsgnjnD { rd, rs1, rs2 }),
+                    2 => Ok(Instruction::FsgnjxD { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                // Min/Max: rm=0→min, rm=1→max
+                (0x14, _) => match rm {
+                    0 => Ok(Instruction::FminS { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FmaxS { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                (0x15, _) => match rm {
+                    0 => Ok(Instruction::FminD { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FmaxD { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                // Cross-precision conversions (rs2 encodes source fmt)
+                (0x20, 1) => Ok(Instruction::FcvtSD { rd, rs1, rm }),
+                (0x21, 0) => Ok(Instruction::FcvtDS { rd, rs1, rm }),
+                // Float→int: rs2 encodes target integer type (0=W,1=WU,2=L,3=LU)
+                (0x60, 0) => Ok(Instruction::FcvtWS  { rd, rs1, rm }),
+                (0x60, 1) => Ok(Instruction::FcvtWUS { rd, rs1, rm }),
+                (0x60, 2) => Ok(Instruction::FcvtLS  { rd, rs1, rm }),
+                (0x60, 3) => Ok(Instruction::FcvtLUS { rd, rs1, rm }),
+                (0x61, 0) => Ok(Instruction::FcvtWD  { rd, rs1, rm }),
+                (0x61, 1) => Ok(Instruction::FcvtWUD { rd, rs1, rm }),
+                (0x61, 2) => Ok(Instruction::FcvtLD  { rd, rs1, rm }),
+                (0x61, 3) => Ok(Instruction::FcvtLUD { rd, rs1, rm }),
+                // Int→float: rs2 encodes source integer type
+                (0x68, 0) => Ok(Instruction::FcvtSW  { rd, rs1, rm }),
+                (0x68, 1) => Ok(Instruction::FcvtSWU { rd, rs1, rm }),
+                (0x68, 2) => Ok(Instruction::FcvtSL  { rd, rs1, rm }),
+                (0x68, 3) => Ok(Instruction::FcvtSLU { rd, rs1, rm }),
+                (0x69, 0) => Ok(Instruction::FcvtDW  { rd, rs1, rm }),
+                (0x69, 1) => Ok(Instruction::FcvtDWU { rd, rs1, rm }),
+                (0x69, 2) => Ok(Instruction::FcvtDL  { rd, rs1, rm }),
+                (0x69, 3) => Ok(Instruction::FcvtDLU { rd, rs1, rm }),
+                // Comparisons: rm field picks op (0=FLE, 1=FLT, 2=FEQ)
+                (0x50, _) => match rm {
+                    0 => Ok(Instruction::FleS { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FltS { rd, rs1, rs2 }),
+                    2 => Ok(Instruction::FeqS { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                (0x51, _) => match rm {
+                    0 => Ok(Instruction::FleD { rd, rs1, rs2 }),
+                    1 => Ok(Instruction::FltD { rd, rs1, rs2 }),
+                    2 => Ok(Instruction::FeqD { rd, rs1, rs2 }),
+                    _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
+                },
+                // FMV and FCLASS (rs2 distinguishes fmv rs2=0 from fclass rs2=1)
+                (0x70, 0) => Ok(Instruction::FmvXW   { rd, rs1 }),
+                (0x70, 1) => Ok(Instruction::FclassS { rd, rs1 }),
+                (0x71, 0) => Ok(Instruction::FmvXD   { rd, rs1 }),
+                (0x71, 1) => Ok(Instruction::FclassD { rd, rs1 }),
+                (0x78, 0) => Ok(Instruction::FmvWX   { rd, rs1 }),
+                (0x79, 0) => Ok(Instruction::FmvDX   { rd, rs1 }),
                 _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },

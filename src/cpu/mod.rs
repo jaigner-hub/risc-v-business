@@ -139,7 +139,7 @@ impl Cpu {
 
     /// Check for pending interrupts. Returns true if an interrupt was delivered.
     /// Priority order (highest first): MEI(11) > MSI(3) > MTI(7) > SEI(9) > SSI(1) > STI(5).
-    fn check_interrupts(&mut self) -> bool {
+    pub fn check_interrupts(&mut self) -> bool {
         let pending = self.csr.mip & self.csr.mie;
         if pending == 0 { return false; }
 
