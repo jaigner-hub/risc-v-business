@@ -120,12 +120,47 @@ impl Cpu {
         }
     }
 
+    /// Check for pending interrupts. Returns true if an interrupt was delivered.
+    /// Priority order (highest first): MEI(11) > MSI(3) > MTI(7) > SEI(9) > SSI(1) > STI(5).
+    fn check_interrupts(&mut self) -> bool {
+        let pending = self.csr.mip & self.csr.mie;
+        if pending == 0 { return false; }
+
+        for &cause_code in &[11u64, 3, 7, 9, 1, 5] {
+            if (pending >> cause_code) & 1 == 0 { continue; }
+
+            let delegated = (self.csr.mideleg >> cause_code) & 1 == 1;
+            let can_fire = match self.mode {
+                PrivMode::M => !delegated && self.csr.mie_bit() == 1,
+                PrivMode::S | PrivMode::U => {
+                    if delegated {
+                        (self.csr.mstatus >> 1) & 1 == 1  // SIE
+                    } else {
+                        true  // non-delegated M-mode interrupt preempts S/U
+                    }
+                }
+            };
+
+            if can_fire {
+                let cause = (1u64 << 63) | cause_code;
+                self.deliver_trap(cause, 0);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Fetch, decode, execute one instruction. Advances pc.
     /// Fetch faults deliver mcause=1; decode failures deliver mcause=2.
     /// Execute errors still propagate as Err.
     pub fn step(&mut self) -> Result<()> {
         use decode::{decode, decode_rvc};
         use execute::execute;
+
+        // Check for pending interrupts before fetching the next instruction.
+        if self.check_interrupts() {
+            return Ok(());
+        }
 
         let pc = self.pc;
 
@@ -393,5 +428,48 @@ mod tests {
         c.step().unwrap();
         assert_eq!(c.pc, 0x8000_0004); // advanced past WFI
         assert_eq!(c.csr.mcause, 0);   // no trap
+    }
+
+    #[test]
+    fn check_interrupts_fires_mti_in_m_mode_with_mie_set() {
+        let mut c = cpu();
+        c.csr.mtvec   = 0x8000_0100; // direct mode
+        c.csr.mie     = 1 << 7;      // MTI enable
+        c.csr.mip     = 1 << 7;      // MTI pending
+        c.csr.mstatus = 1 << 3;      // MIE=1
+        c.mode = PrivMode::M;
+        c.step().unwrap();            // step() calls check_interrupts() at top
+        assert_eq!(c.csr.mcause, (1u64 << 63) | 7); // MTI interrupt cause
+        assert_eq!(c.pc, 0x8000_0100);               // direct mode: goes to base
+    }
+
+    #[test]
+    fn check_interrupts_does_not_fire_when_mie_clear() {
+        let mut c = cpu();
+        c.csr.mtvec   = 0x8000_0100;
+        c.csr.mie     = 1 << 7;      // MTI enable
+        c.csr.mip     = 1 << 7;      // MTI pending
+        c.csr.mstatus = 0;            // MIE=0 — interrupts globally disabled
+        c.mode = PrivMode::M;
+        c.bus.store(0x8000_0000, 4, 0x00000013u64).unwrap(); // NOP
+        c.step().unwrap();
+        assert_eq!(c.csr.mcause, 0);  // no interrupt delivered
+        assert_eq!(c.pc, 0x8000_0004); // NOP executed
+    }
+
+    #[test]
+    fn check_interrupts_routes_delegated_sti_to_s_mode() {
+        let mut c = cpu();
+        c.csr.stvec   = 0x8000_0200;
+        c.csr.mtvec   = 0x8000_0100;
+        c.csr.mie     = 1 << 5;      // STIE enable (bit 5)
+        c.csr.mip     = 1 << 5;      // STIP pending (bit 5)
+        c.csr.mideleg = 1 << 5;      // delegate STI to S-mode
+        c.csr.mstatus = 1 << 1;      // SIE=1 (bit 1)
+        c.mode = PrivMode::S;
+        c.step().unwrap();
+        assert_eq!(c.csr.scause, (1u64 << 63) | 5); // STI interrupt cause
+        assert_eq!(c.mode, PrivMode::S);             // stays in S-mode (delegated)
+        assert_eq!(c.csr.mcause, 0);                 // M-mode untouched
     }
 }
