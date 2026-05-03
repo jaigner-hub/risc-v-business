@@ -1217,4 +1217,19 @@ mod tests {
         assert_eq!(cpu.regs[3], 0xFFFF_FFFF_DEAD_BEEFu64);
         assert_eq!(next_pc, u64::MAX);
     }
+
+    // LW x2, 0(x1) encoding: imm=0, rs1=1, funct3=2, rd=2, opcode=0x03
+    // = (0<<20)|(1<<15)|(2<<12)|(2<<7)|0x03 = 0x0000A103
+    #[test]
+    fn jit_load_fault_returns_sentinel() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0x0000_1000u64; // unmapped address — outside the 4 KiB test RAM
+        cpu.bus.store(ram, 4, 0x0000A103u64).unwrap(); // LW x2, 0(x1)
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, u64::MAX, "faulting load must return slow-path sentinel");
+    }
 }
