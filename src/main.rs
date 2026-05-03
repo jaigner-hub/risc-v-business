@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use riscv_emu::{cpu::Cpu, dtb, dtb::INITRD_BASE, loader};
+use std::sync::mpsc;
 
 #[derive(Parser)]
 #[command(name = "riscv-emu", about = "RV64I emulator")]
@@ -73,12 +74,53 @@ fn main() -> Result<()> {
         cpu.set_reg(11, DTB_BASE); // a1 = FDT pointer
     }
 
+    // Stdin reader thread feeds bytes into the UART RX buffer.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let stdin = std::io::stdin();
+        let mut buf = [0u8; 64];
+        loop {
+            match stdin.lock().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if stdin_tx.send(b).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     loop {
         cpu.step()?;
+        // Drain stdin → UART RX only after the shell prompt and DSR query are handled.
+        if cpu.bus.uart.stdin_ready {
+            while let Ok(byte) = stdin_rx.try_recv() {
+                cpu.bus.uart.push_rx(byte);
+            }
+        }
         if cpu.bus.clint.tick() {
             cpu.csr.mip |= 1 << 7;    // set MTIP
         } else {
             cpu.csr.mip &= !(1u64 << 7); // clear MTIP
+        }
+        // Sstc: STIP follows mtime vs stimecmp. Priv §15.
+        if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
+            cpu.csr.mip |= 1 << 5;    // set STIP
+        } else {
+            cpu.csr.mip &= !(1u64 << 5); // clear STIP
+        }
+        // SEIP: set when UART has a pending interrupt routed through PLIC to S-mode.
+        // DTB declares UART at PLIC IRQ 10 (QEMU virt convention).
+        let uart_irq = cpu.bus.uart.irq_pending();
+        cpu.bus.plic.set_pending(10, uart_irq);
+        if cpu.bus.plic.has_interrupt() {
+            cpu.csr.mip |= 1 << 9;    // set SEIP
+        } else {
+            cpu.csr.mip &= !(1u64 << 9); // clear SEIP
         }
     }
 }

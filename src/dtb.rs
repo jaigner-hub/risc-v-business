@@ -22,7 +22,7 @@ pub fn build_dtb(initrd_size: u64) -> Result<Vec<u8>> {
     fdt.property_string("stdout-path", "/soc/serial@10000000")?;
     fdt.property_string(
         "bootargs",
-        "console=ttyS0 earlycon=uart8250,mmio,0x10000000 rdinit=/init",
+        "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb rdinit=/init",
     )?;
     if initrd_size > 0 {
         fdt.property_u64("linux,initrd-start", INITRD_BASE)?;

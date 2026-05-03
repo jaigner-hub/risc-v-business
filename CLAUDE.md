@@ -48,8 +48,8 @@ Do NOT start phase N+1 until phase N's test suite is fully green.
 | 1 | All `rv64ui-p-*` pass | Done |
 | 2 | `rv64um-p-*`, `rv64ua-p-*`, `rv64mi-p-*` pass | Done |
 | 3 | `rv64si-p-*`, `rv64ui-v-*` pass | Done |
-| 4 (current) | OpenSBI banner prints | Not started |
-| 5 | `#` shell prompt, `uname -a` and `ls /` work | Not started |
+| 4 | OpenSBI banner prints | Done |
+| 5 (current) | `#` shell prompt, `uname -a` and `ls /` work | Done |
 
 ## Memory map (mirrors QEMU virt)
 
