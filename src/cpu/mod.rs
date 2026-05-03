@@ -31,7 +31,7 @@ impl Tracer {
 }
 
 pub struct Cpu {
-    regs:   [u64; 32],
+    pub regs:   [u64; 32],
     /// Floating-point registers (F/D extension). Stored as u64 to hold either
     /// a 32-bit single (NaN-boxed in upper bits) or a 64-bit double.
     /// Phase 5: only FLW/FLD/FSW/FSD use these — no FP arithmetic implemented.
@@ -49,6 +49,10 @@ pub struct Cpu {
     /// Floating-point control and status register (CSR 0x003).
     /// Stub: not driven by FP arithmetic, but preserved across save/restore.
     pub fcsr: u32,
+    /// JIT block cache invalidation flag. Set by execute arms that change
+    /// address translation (satp write, sfence.vma) so the run loop can
+    /// flush JitCache before continuing.
+    pub jit_invalidate: bool,
 }
 
 // Compute trap PC per Priv §5.1.10: vectored mode dispatches interrupts to base + cause_code*4.
@@ -77,6 +81,7 @@ impl Cpu {
             mmu: mmu::Mmu::new(),
             inst_size: 4,
             fcsr: 0,
+            jit_invalidate: false,
         }
     }
 
