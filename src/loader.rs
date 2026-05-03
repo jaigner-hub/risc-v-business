@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use goblin::elf::{Elf, program_header::PT_LOAD};
+use goblin::elf::{Elf, header::ET_DYN, program_header::PT_LOAD};
 use crate::bus::Bus;
 
 pub struct LoadedElf {
@@ -19,6 +19,11 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
         return Err(anyhow!("expected ELF64, got ELF32"));
     }
 
+    // PIE (ET_DYN) ELFs have addresses relative to zero; load them at RAM_BASE.
+    // ET_EXEC ELFs (riscv-tests) are linked with p_paddr >= RAM_BASE already.
+    let is_pie = elf.header.e_type == ET_DYN;
+    let load_offset: u64 = if is_pie { RAM_BASE } else { 0 };
+
     let mut bus = Bus::new(RAM_SIZE, RAM_BASE);
 
     for ph in &elf.program_headers {
@@ -27,7 +32,8 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
         let file_end   = file_start + ph.p_filesz as usize;
         // p_paddr: physical-memory test ELFs (rv64ui-p-*) are linked flat;
         // MMU-enabled phases still load to physical addresses via Sv39.
-        let mem_addr = ph.p_paddr;
+        // For PIE ELFs, add load_offset to relocate from 0 to RAM_BASE.
+        let mem_addr = ph.p_paddr + load_offset;
 
         if mem_addr < RAM_BASE {
             return Err(anyhow!("PT_LOAD segment at {mem_addr:#x} is below RAM base {RAM_BASE:#x}"));
@@ -50,5 +56,5 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
         .find(|s| elf.strtab.get_at(s.st_name) == Some("tohost"))
         .map(|s| s.st_value);
 
-    Ok(LoadedElf { bus, entry: elf.entry, tohost_addr })
+    Ok(LoadedElf { bus, entry: elf.entry + load_offset, tohost_addr })
 }
