@@ -86,6 +86,12 @@ impl Cpu {
 
         let pc = self.pc;
 
+        // Misaligned PC → mcause=0 (instruction address misaligned)
+        if pc & 0x3 != 0 {
+            self.deliver_trap(0, pc);
+            return Ok(());
+        }
+
         // Instruction fetch — bus error → mcause=1 (instruction access fault)
         let raw = match self.bus.load(pc, 4) {
             Ok(v) => v as u32,

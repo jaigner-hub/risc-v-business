@@ -14,6 +14,9 @@ pub struct Csr {
     pub scause:   u64,
     pub stval:    u64,
     pub satp:     u64,
+    pub pmpcfg0:  u64,
+    pub pmpcfg2:  u64,
+    pub pmpaddr:  [u64; 16],
 }
 
 impl Csr {
@@ -34,12 +37,16 @@ impl Csr {
             scause:   0,
             stval:    0,
             satp:     0,
+            pmpcfg0:  0,
+            pmpcfg2:  0,
+            pmpaddr:  [0u64; 16],
         }
     }
 
     pub fn read(&self, addr: u16) -> u64 {
         match addr {
-            0x300 => self.mstatus,
+            // UXL[33:32]=2 and SXL[35:34]=2 are hardwired for RV64. Priv §3.1.6.2
+            0x300 => self.mstatus | 0x0000_000A_0000_0000,
             0x301 => self.misa,
             0x304 => self.mie,
             0x305 => self.mtvec,
@@ -54,6 +61,9 @@ impl Csr {
             0x142 => self.scause,
             0x143 => self.stval,
             0x180 => self.satp,
+            0x3A0 => self.pmpcfg0,
+            0x3A2 => self.pmpcfg2,
+            0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize],
             // Read-only: hardwired zero
             0xf11 => 0, // mvendorid
             0xf12 => 0, // marchid
@@ -83,12 +93,13 @@ impl Csr {
 
     pub fn write(&mut self, addr: u16, val: u64) {
         match addr {
-            0x300 => self.mstatus  = val,
+            // UXL[33:32] and SXL[35:34] are read-only; mask them out on write
+            0x300 => self.mstatus  = val & !0x0000_000F_0000_0000u64,
             0x301 => {}            // misa: read-only
             0x304 => self.mie      = val,
-            0x305 => self.mtvec    = val,
+            0x305 => self.mtvec    = val & !0x3,  // only direct mode (MODE=0) supported
             0x340 => self.mscratch = val,
-            0x341 => self.mepc     = val,
+            0x341 => self.mepc     = val & !0x3,  // IALIGN=32: bits[1:0] always 0
             0x342 => self.mcause   = val,
             0x343 => self.mtval    = val,
             0x344 => self.mip      = val,
@@ -98,6 +109,9 @@ impl Csr {
             0x142 => self.scause   = val,
             0x143 => self.stval    = val,
             0x180 => self.satp     = val,
+            0x3A0 => self.pmpcfg0  = val,
+            0x3A2 => self.pmpcfg2  = val,
+            0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,
             // Read-only: silently ignore
             0xf11..=0xf14 => {}
             _ => {} // unimplemented or read-only: silently ignore (Priv §2.1)

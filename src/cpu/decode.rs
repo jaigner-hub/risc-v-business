@@ -119,7 +119,7 @@ pub enum Instruction {
     Ecall,   // opcode 0x73, imm=0
     Ebreak,  // opcode 0x73, imm=1
     Mret,    // opcode 0x73, imm=0x302 — return from M-mode trap
-    Sret,    // opcode 0x73, imm=0x102 — return from S-mode trap (Phase 3)
+    Sret,    // opcode 0x73, imm=0x102 — return from S-mode trap (TSR-conditional)
     Wfi,     // opcode 0x73, imm=0x105 — wait for interrupt (NOP for now)
     // --- Zicsr extension (RV CSR access) ---
     // Spec: Unprivileged §9. csr is the 12-bit CSR address (bits[31:20]).
@@ -331,8 +331,8 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 0x0 => match (csr, rs1, rd) {
                     (0x000, 0, 0) => Ok(Instruction::Ecall),
                     (0x001, 0, 0) => Ok(Instruction::Ebreak),
-                    (0x302, 0, 0) => Ok(Instruction::Mret),
                     (0x102, 0, 0) => Ok(Instruction::Sret),
+                    (0x302, 0, 0) => Ok(Instruction::Mret),
                     (0x105, 0, 0) => Ok(Instruction::Wfi),
                     _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
                 },

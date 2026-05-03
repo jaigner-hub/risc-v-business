@@ -163,36 +163,70 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
 
         // --- Branches ---
+        // Misaligned branch targets trap before the instruction commits. Spec: Priv §3.1.15
         Instruction::Beq  { rs1, rs2, imm } => {
-            if cpu.reg(rs1) == cpu.reg(rs2) { next_pc = pc.wrapping_add(imm as u64); }
+            if cpu.reg(rs1) == cpu.reg(rs2) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
         Instruction::Bne  { rs1, rs2, imm } => {
-            if cpu.reg(rs1) != cpu.reg(rs2) { next_pc = pc.wrapping_add(imm as u64); }
+            if cpu.reg(rs1) != cpu.reg(rs2) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
         Instruction::Blt  { rs1, rs2, imm } => {
-            if (cpu.reg(rs1) as i64) < (cpu.reg(rs2) as i64) { next_pc = pc.wrapping_add(imm as u64); }
+            if (cpu.reg(rs1) as i64) < (cpu.reg(rs2) as i64) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
         Instruction::Bge  { rs1, rs2, imm } => {
-            if (cpu.reg(rs1) as i64) >= (cpu.reg(rs2) as i64) { next_pc = pc.wrapping_add(imm as u64); }
+            if (cpu.reg(rs1) as i64) >= (cpu.reg(rs2) as i64) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
         Instruction::Bltu { rs1, rs2, imm } => {
-            if cpu.reg(rs1) < cpu.reg(rs2) { next_pc = pc.wrapping_add(imm as u64); }
+            if cpu.reg(rs1) < cpu.reg(rs2) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
         Instruction::Bgeu { rs1, rs2, imm } => {
-            if cpu.reg(rs1) >= cpu.reg(rs2) { next_pc = pc.wrapping_add(imm as u64); }
+            if cpu.reg(rs1) >= cpu.reg(rs2) {
+                let t = pc.wrapping_add(imm as u64);
+                if t & 0x3 != 0 { cpu.deliver_trap(0, t); next_pc = cpu.pc; }
+                else { next_pc = t; }
+            }
         },
 
         // --- Jumps ---
         // JAL: rd = pc+4, pc = pc + imm. Spec: Unprivileged §2.5
         Instruction::Jal { rd, imm } => {
-            cpu.set_reg(rd, next_pc);
-            next_pc = pc.wrapping_add(imm as u64);
+            let target = pc.wrapping_add(imm as u64);
+            if target & 0x3 != 0 {
+                cpu.deliver_trap(0, target); next_pc = cpu.pc;
+            } else {
+                cpu.set_reg(rd, next_pc);
+                next_pc = target;
+            }
         },
         // JALR: rd = pc+4, pc = (rs1 + imm) & ~1. Spec: Unprivileged §2.5
         Instruction::Jalr { rd, rs1, imm } => {
             let target = cpu.reg(rs1).wrapping_add(imm as u64) & !1;
-            cpu.set_reg(rd, next_pc);
-            next_pc = target;
+            if target & 0x3 != 0 {
+                cpu.deliver_trap(0, target); next_pc = cpu.pc;
+            } else {
+                cpu.set_reg(rd, next_pc);
+                next_pc = target;
+            }
         },
 
         // --- Upper immediate ---
@@ -231,12 +265,15 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             cpu.csr.mret();
             next_pc = cpu.csr.mepc;
         },
-        // SRET: return from a supervisor-mode trap. Phase 3 will implement properly;
-        // for now treat as MRET-like fallback so tests that touch it don't crash.
+        // SRET: return from S-mode trap. Illegal if mstatus.TSR=1 (Priv §3.1.6.4).
         Instruction::Sret => {
-            next_pc = cpu.csr_read(CSR_SEPC);
+            if (cpu.csr.mstatus >> 22) & 1 != 0 {
+                cpu.deliver_trap(2, 0x10200073);
+                next_pc = cpu.pc;
+            } else {
+                next_pc = cpu.csr_read(0x141); // sepc
+            }
         },
-
         // --- Zicsr (CSR access) ---
         // Spec: Unprivileged §9.1. Each CSRR* atomically reads csr into rd, then
         // writes a new value back. The exact write source/operation differs per
@@ -534,7 +571,6 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
 }
 
 // CSR addresses used by the Phase 1 trap path. Spec: Privileged §2.2.
-const CSR_SEPC:   u16 = 0x141;
 const CSR_MTVEC:  u16 = 0x305;
 const CSR_MEPC:   u16 = 0x341;
 const CSR_MCAUSE: u16 = 0x342;
