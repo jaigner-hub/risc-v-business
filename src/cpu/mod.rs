@@ -7,6 +7,7 @@ use anyhow::Result;
 use csr::Csr;
 
 pub mod mmu;
+use mmu::AccessType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivMode { U = 0, S = 1, M = 3 }
@@ -115,12 +116,14 @@ impl Cpu {
             return Ok(());
         }
 
-        // Instruction fetch — bus error → mcause=1 (instruction access fault)
-        let raw = match self.bus.load(pc, 4) {
-            Ok(v) => v as u32,
-            Err(_) => {
-                self.deliver_trap(1, pc);
-                return Ok(());
+        // Instruction fetch — translate VA → PA through MMU, then bus load. Priv §4.3.
+        let raw = match self.mmu.translate(
+            &mut self.bus, self.csr.satp, self.mode, self.csr.mstatus, pc, AccessType::Fetch
+        ) {
+            Err(f) => { self.deliver_trap(f.cause, f.tval); return Ok(()); }
+            Ok(pa) => match self.bus.load(pa, 4) {
+                Err(_) => { self.deliver_trap(1, pc); return Ok(()); }
+                Ok(v)  => v as u32,
             }
         };
 
