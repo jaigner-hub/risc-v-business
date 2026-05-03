@@ -149,6 +149,379 @@ static JIT_LOAD_CALLOUTS: [JitLoadFn; 4] =
 static JIT_STORE_CALLOUTS: [JitStoreFn; 4] =
     [jit_store8, jit_store16, jit_store32, jit_store64];
 
+// ─── RVC helpers ─────────────────────────────────────────────────────────────
+
+#[inline(always)]
+fn sign_ext(val: u64, bits: u32) -> i64 {
+    let shift = 64 - bits;
+    ((val << shift) as i64) >> shift
+}
+
+fn rvc_j_imm(raw: u16) -> i64 {
+    // §16.3: inst[12]=imm[11], inst[11]=imm[4], inst[10:9]=imm[9:8],
+    //        inst[8]=imm[10], inst[7]=imm[6], inst[6]=imm[7],
+    //        inst[5:3]=imm[3:1], inst[2]=imm[5]
+    let r = raw as u64;
+    let imm = ((r >> 12) & 1) << 11
+            | ((r >> 11) & 1) <<  4
+            | ((r >>  9) & 3) <<  8
+            | ((r >>  8) & 1) << 10
+            | ((r >>  7) & 1) <<  6
+            | ((r >>  6) & 1) <<  7
+            | ((r >>  3) & 7) <<  1
+            | ((r >>  2) & 1) <<  5;
+    sign_ext(imm, 12)
+}
+
+fn rvc_b_imm(raw: u16) -> i64 {
+    // §16.3: inst[12]=imm[8], inst[11:10]=imm[4:3], inst[6:5]=imm[7:6],
+    //        inst[4:3]=imm[2:1], inst[2]=imm[5]
+    let r = raw as u64;
+    let imm = ((r >> 12) & 1) << 8
+            | ((r >> 10) & 3) << 3
+            | ((r >>  5) & 3) << 6
+            | ((r >>  3) & 3) << 1
+            | ((r >>  2) & 1) << 5;
+    sign_ext(imm, 9)
+}
+
+enum RvcEffect {
+    Seq,       // compiled, advance PC by 2 and continue
+    Terminal,  // compiled terminator (branch/jump), end block
+    Unhandled, // unrecognised or reserved, fall back to slow path
+}
+
+fn emit_rvc(ops: &mut Assembler, raw: u16, guest_pc: u64) -> RvcEffect {
+    let quadrant = raw & 0x3;
+    let funct3   = (raw >> 13) as usize;
+    let next_pc  = guest_pc.wrapping_add(2);
+
+    match quadrant {
+        // ── Quadrant 0 ──────────────────────────────────────────────────────
+        0b00 => match funct3 {
+            0b000 => {
+                // C.ADDI4SPN: rd' = x(bits[4:2]+8), uimm = {bits[12:11],bits[10:7],bit[6],bit[5]}
+                let rd   = ((raw >> 2) & 0x7) as usize + 8;
+                let uimm = (((raw >> 11) & 0x3) as i64) << 4
+                         | (((raw >>  7) & 0xf) as i64) << 6
+                         | (((raw >>  6) & 0x1) as i64) << 2
+                         | (((raw >>  5) & 0x1) as i64) << 3;
+                if uimm == 0 { return RvcEffect::Unhandled; } // reserved
+                let sp_off = (2 * 8) as i32;
+                let rd_off = (rd  * 8) as i32;
+                let uimm32 = uimm as i32;
+                dynasm!(ops ; .arch x64
+                    ; mov rax, QWORD [r15 + sp_off]
+                    ; add rax, uimm32
+                    ; mov QWORD [r15 + rd_off], rax
+                );
+                RvcEffect::Seq
+            }
+            0b011 => {
+                // C.LD: ld rd', uimm(rs1')  uimm = {bits[12:10],bits[6:5],00000}
+                let rd   = ((raw >> 2) & 0x7) as usize + 8;
+                let rs1  = ((raw >> 7) & 0x7) as usize + 8;
+                let uimm = (((raw >> 10) & 0x7) as i64) << 3
+                         | (((raw >>  5) & 0x3) as i64) << 6;
+                emit_load(ops, rd, rs1, uimm, jit_load64, guest_pc);
+                RvcEffect::Seq
+            }
+            0b111 => {
+                // C.SD: sd rs2', uimm(rs1')
+                let rs2  = ((raw >> 2) & 0x7) as usize + 8;
+                let rs1  = ((raw >> 7) & 0x7) as usize + 8;
+                let uimm = (((raw >> 10) & 0x7) as i64) << 3
+                         | (((raw >>  5) & 0x3) as i64) << 6;
+                emit_store(ops, rs1, rs2, uimm, jit_store64, guest_pc);
+                RvcEffect::Seq
+            }
+            _ => RvcEffect::Unhandled,
+        },
+
+        // ── Quadrant 1 ──────────────────────────────────────────────────────
+        0b01 => match funct3 {
+            0b000 => {
+                // C.NOP (rd=0) or C.ADDI (rd!=0)
+                let rd    = ((raw >> 7) & 0x1f) as usize;
+                if rd == 0 { return RvcEffect::Seq; } // C.NOP
+                let imm_u = (((raw >> 12) & 0x1) as u64) << 5 | ((raw >> 2) as u64 & 0x1f);
+                let imm   = sign_ext(imm_u, 6) as i32;
+                let off   = (rd * 8) as i32;
+                dynasm!(ops ; .arch x64
+                    ; mov rax, QWORD [r15 + off]
+                    ; add rax, imm
+                    ; mov QWORD [r15 + off], rax
+                );
+                RvcEffect::Seq
+            }
+            0b001 => {
+                // C.ADDIW: addiw rd, rd, nzimm  (rd != 0)
+                let rd = ((raw >> 7) & 0x1f) as usize;
+                if rd == 0 { return RvcEffect::Unhandled; } // reserved
+                let imm_u = (((raw >> 12) & 0x1) as u64) << 5 | ((raw >> 2) as u64 & 0x1f);
+                let imm   = sign_ext(imm_u, 6) as i32;
+                let off   = (rd * 8) as i32;
+                dynasm!(ops ; .arch x64
+                    ; mov eax, DWORD [r15 + off]
+                    ; add eax, imm
+                    ; movsxd rax, eax
+                    ; mov QWORD [r15 + off], rax
+                );
+                RvcEffect::Seq
+            }
+            0b010 => {
+                // C.LI: addi rd, x0, imm
+                let rd    = ((raw >> 7) & 0x1f) as usize;
+                if rd == 0 { return RvcEffect::Seq; } // hint
+                let imm_u = (((raw >> 12) & 0x1) as u64) << 5 | ((raw >> 2) as u64 & 0x1f);
+                let imm   = sign_ext(imm_u, 6) as i32;
+                let off   = (rd * 8) as i32;
+                dynasm!(ops ; .arch x64
+                    ; mov rax, imm  // sign-extends i32 → i64
+                    ; mov QWORD [r15 + off], rax
+                );
+                RvcEffect::Seq
+            }
+            0b011 => {
+                let rd = ((raw >> 7) & 0x1f) as usize;
+                if rd == 2 {
+                    // C.ADDI16SP: addi x2, x2, nzimm*16
+                    // nzimm[9]=bit[12], nzimm[8:7]=bits[4:3], nzimm[6]=bit[5],
+                    //          nzimm[5]=bit[2],  nzimm[4]=bit[6]
+                    let nzimm_u = (((raw >> 12) & 0x1) as u64) << 9
+                                | (((raw >>  3) & 0x3) as u64) << 7
+                                | (((raw >>  5) & 0x1) as u64) << 6
+                                | (((raw >>  2) & 0x1) as u64) << 5
+                                | (((raw >>  6) & 0x1) as u64) << 4;
+                    let nzimm = sign_ext(nzimm_u, 10) as i32;
+                    if nzimm == 0 { return RvcEffect::Unhandled; } // reserved
+                    let sp_off = (2 * 8) as i32;
+                    dynasm!(ops ; .arch x64
+                        ; mov rax, QWORD [r15 + sp_off]
+                        ; add rax, nzimm
+                        ; mov QWORD [r15 + sp_off], rax
+                    );
+                    RvcEffect::Seq
+                } else if rd != 0 {
+                    // C.LUI: lui rd, nzimm  (stored as sign_ext(imm6,6)<<12)
+                    let nzimm_u = (((raw >> 12) & 0x1) as u64) << 5 | ((raw >> 2) as u64 & 0x1f);
+                    let nzimm   = sign_ext(nzimm_u, 6);
+                    if nzimm == 0 { return RvcEffect::Unhandled; } // reserved
+                    let val = nzimm << 12;
+                    let off = (rd * 8) as i32;
+                    dynasm!(ops ; .arch x64
+                        ; mov rax, QWORD val
+                        ; mov QWORD [r15 + off], rax
+                    );
+                    RvcEffect::Seq
+                } else {
+                    RvcEffect::Unhandled // rd=0 HINTS
+                }
+            }
+            0b100 => {
+                let op2   = (raw >> 10) & 0x3;
+                let rd    = ((raw >> 7) & 0x7) as usize + 8;
+                let off   = (rd * 8) as i32;
+                match op2 {
+                    0b00 => {
+                        // C.SRLI
+                        let shamt = (((raw >> 12) & 0x1) << 5 | ((raw >> 2) & 0x1f)) as i8;
+                        dynasm!(ops ; .arch x64
+                            ; mov rax, QWORD [r15 + off]
+                            ; shr rax, shamt
+                            ; mov QWORD [r15 + off], rax
+                        );
+                        RvcEffect::Seq
+                    }
+                    0b01 => {
+                        // C.SRAI
+                        let shamt = (((raw >> 12) & 0x1) << 5 | ((raw >> 2) & 0x1f)) as i8;
+                        dynasm!(ops ; .arch x64
+                            ; mov rax, QWORD [r15 + off]
+                            ; sar rax, shamt
+                            ; mov QWORD [r15 + off], rax
+                        );
+                        RvcEffect::Seq
+                    }
+                    0b10 => {
+                        // C.ANDI
+                        let imm_u = (((raw >> 12) & 0x1) as u64) << 5 | ((raw >> 2) as u64 & 0x1f);
+                        let imm   = sign_ext(imm_u, 6) as i32;
+                        dynasm!(ops ; .arch x64
+                            ; mov rax, QWORD [r15 + off]
+                            ; and rax, imm
+                            ; mov QWORD [r15 + off], rax
+                        );
+                        RvcEffect::Seq
+                    }
+                    0b11 => {
+                        let bit12   = (raw >> 12) & 0x1;
+                        let op_sel  = (raw >> 5) & 0x3;
+                        let rs2     = ((raw >> 2) & 0x7) as usize + 8;
+                        let rs2_off = (rs2 * 8) as i32;
+                        if bit12 == 0 {
+                            match op_sel {
+                                0b00 => { dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15+off] ; sub rax, QWORD [r15+rs2_off] ; mov QWORD [r15+off], rax); RvcEffect::Seq } // C.SUB
+                                0b01 => { dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15+off] ; xor rax, QWORD [r15+rs2_off] ; mov QWORD [r15+off], rax); RvcEffect::Seq } // C.XOR
+                                0b10 => { dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15+off] ; or  rax, QWORD [r15+rs2_off] ; mov QWORD [r15+off], rax); RvcEffect::Seq } // C.OR
+                                0b11 => { dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15+off] ; and rax, QWORD [r15+rs2_off] ; mov QWORD [r15+off], rax); RvcEffect::Seq } // C.AND
+                                _    => unreachable!(),
+                            }
+                        } else {
+                            match op_sel {
+                                0b00 => { // C.SUBW
+                                    dynasm!(ops ; .arch x64 ; mov eax, DWORD [r15+off] ; sub eax, DWORD [r15+rs2_off] ; movsxd rax, eax ; mov QWORD [r15+off], rax);
+                                    RvcEffect::Seq
+                                }
+                                0b01 => { // C.ADDW
+                                    dynasm!(ops ; .arch x64 ; mov eax, DWORD [r15+off] ; add eax, DWORD [r15+rs2_off] ; movsxd rax, eax ; mov QWORD [r15+off], rax);
+                                    RvcEffect::Seq
+                                }
+                                _ => RvcEffect::Unhandled, // reserved
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            0b101 => {
+                // C.J: jal x0, offset
+                let target = guest_pc.wrapping_add(rvc_j_imm(raw) as u64);
+                emit_return(ops, target);
+                RvcEffect::Terminal
+            }
+            0b110 => {
+                // C.BEQZ: beq rs1', x0, offset
+                let rs1     = ((raw >> 7) & 0x7) as usize + 8;
+                let imm     = rvc_b_imm(raw);
+                let taken   = guest_pc.wrapping_add(imm as u64);
+                let fall    = next_pc;
+                let rs1_off = (rs1 * 8) as i32;
+                let lbl     = ops.new_dynamic_label();
+                dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15 + rs1_off] ; test rax, rax ; jz =>lbl);
+                emit_return(ops, fall);
+                dynasm!(ops ; .arch x64 ; =>lbl);
+                emit_return(ops, taken);
+                RvcEffect::Terminal
+            }
+            0b111 => {
+                // C.BNEZ: bne rs1', x0, offset
+                let rs1     = ((raw >> 7) & 0x7) as usize + 8;
+                let imm     = rvc_b_imm(raw);
+                let taken   = guest_pc.wrapping_add(imm as u64);
+                let fall    = next_pc;
+                let rs1_off = (rs1 * 8) as i32;
+                let lbl     = ops.new_dynamic_label();
+                dynasm!(ops ; .arch x64 ; mov rax, QWORD [r15 + rs1_off] ; test rax, rax ; jnz =>lbl);
+                emit_return(ops, fall);
+                dynasm!(ops ; .arch x64 ; =>lbl);
+                emit_return(ops, taken);
+                RvcEffect::Terminal
+            }
+            _ => RvcEffect::Unhandled,
+        },
+
+        // ── Quadrant 2 ──────────────────────────────────────────────────────
+        0b10 => match funct3 {
+            0b000 => {
+                // C.SLLI: slli rd, rd, shamt  (rd != 0)
+                let rd    = ((raw >> 7) & 0x1f) as usize;
+                if rd == 0 { return RvcEffect::Seq; } // hint
+                let shamt = (((raw >> 12) & 0x1) << 5 | ((raw >> 2) & 0x1f)) as i8;
+                let off   = (rd * 8) as i32;
+                dynasm!(ops ; .arch x64
+                    ; mov rax, QWORD [r15 + off]
+                    ; shl rax, shamt
+                    ; mov QWORD [r15 + off], rax
+                );
+                RvcEffect::Seq
+            }
+            0b011 => {
+                // C.LDSP: ld rd, uimm(x2)  (rd != 0)
+                // uimm[5]=bit[12], uimm[4:3]=bits[6:5], uimm[8:6]=bits[4:2]
+                let rd   = ((raw >> 7) & 0x1f) as usize;
+                if rd == 0 { return RvcEffect::Unhandled; } // reserved
+                let uimm = (((raw >> 12) & 0x1) as i64) << 5
+                         | (((raw >>  5) & 0x3) as i64) << 3
+                         | (((raw >>  2) & 0x7) as i64) << 6;
+                emit_load(ops, rd, 2, uimm, jit_load64, guest_pc);
+                RvcEffect::Seq
+            }
+            0b100 => {
+                let bit12  = (raw >> 12) & 0x1;
+                let rs1_rd = ((raw >> 7) & 0x1f) as usize;
+                let rs2    = ((raw >> 2) & 0x1f) as usize;
+                if bit12 == 0 && rs2 == 0 {
+                    // C.JR: jalr x0, 0(rs1)
+                    if rs1_rd == 0 { return RvcEffect::Unhandled; } // reserved
+                    let rs1_off = (rs1_rd * 8) as i32;
+                    dynasm!(ops ; .arch x64
+                        ; mov rcx, QWORD [r15 + rs1_off]
+                        ; and rcx, DWORD -2
+                        ; add rsp, 8
+                        ; pop r14
+                        ; pop r15
+                        ; mov rax, rcx
+                        ; ret
+                    );
+                    RvcEffect::Terminal
+                } else if bit12 == 0 {
+                    // C.MV: add rd, x0, rs2
+                    if rs1_rd == 0 { return RvcEffect::Seq; } // hint
+                    let rd_off  = (rs1_rd * 8) as i32;
+                    let rs2_off = (rs2    * 8) as i32;
+                    dynasm!(ops ; .arch x64
+                        ; mov rax, QWORD [r15 + rs2_off]
+                        ; mov QWORD [r15 + rd_off], rax
+                    );
+                    RvcEffect::Seq
+                } else if rs2 == 0 {
+                    // C.JALR: jalr x1, 0(rs1)  (rs1!=0); rs1=0 is C.EBREAK
+                    if rs1_rd == 0 { return RvcEffect::Unhandled; } // C.EBREAK → interp
+                    let rs1_off = (rs1_rd * 8) as i32;
+                    let ra_off  = 8i32; // x1 = ra
+                    let link_pc = next_pc as i64;
+                    dynasm!(ops ; .arch x64
+                        ; mov rcx, QWORD [r15 + rs1_off]
+                        ; mov rax, QWORD link_pc
+                        ; mov QWORD [r15 + ra_off], rax
+                        ; and rcx, DWORD -2
+                        ; add rsp, 8
+                        ; pop r14
+                        ; pop r15
+                        ; mov rax, rcx
+                        ; ret
+                    );
+                    RvcEffect::Terminal
+                } else {
+                    // C.ADD: add rd, rd, rs2
+                    if rs1_rd == 0 { return RvcEffect::Seq; } // hint
+                    let rd_off  = (rs1_rd * 8) as i32;
+                    let rs2_off = (rs2    * 8) as i32;
+                    dynasm!(ops ; .arch x64
+                        ; mov rax, QWORD [r15 + rd_off]
+                        ; add rax, QWORD [r15 + rs2_off]
+                        ; mov QWORD [r15 + rd_off], rax
+                    );
+                    RvcEffect::Seq
+                }
+            }
+            0b111 => {
+                // C.SDSP: sd rs2, uimm(x2)
+                // uimm[5:3]=bits[12:10], uimm[8:6]=bits[9:7]
+                let rs2  = ((raw >> 2) & 0x1f) as usize;
+                let uimm = (((raw >> 10) & 0x7) as i64) << 3
+                         | (((raw >>  7) & 0x7) as i64) << 6;
+                emit_store(ops, 2, rs2, uimm, jit_store64, guest_pc);
+                RvcEffect::Seq
+            }
+            _ => RvcEffect::Unhandled,
+        },
+
+        _ => RvcEffect::Unhandled, // quadrant 11 = 32-bit, handled in compile()
+    }
+}
+
 // ─── Block emitters ──────────────────────────────────────────────────────────
 //
 // Calling convention:
@@ -389,8 +762,23 @@ impl JitCache {
                 Err(_) => { block_exit!(); break; }
             };
 
-            // RVC (16-bit): all fall to slow path in Phase 6a.
-            if raw4 & 0x3 != 0x3 { block_exit!(); break; }
+            // RVC (16-bit compressed instructions)
+            if raw4 & 0x3 != 0x3 {
+                let raw16 = (raw4 & 0xffff) as u16;
+                match emit_rvc(&mut ops, raw16, guest_pc) {
+                    RvcEffect::Seq => {
+                        guest_pc = guest_pc.wrapping_add(2);
+                        inst_count += 1;
+                        if inst_count >= 64 {
+                            emit_return(&mut ops, guest_pc);
+                            break;
+                        }
+                        continue;
+                    }
+                    RvcEffect::Terminal => { inst_count += 1; break; }
+                    RvcEffect::Unhandled => { block_exit!(); break; }
+                }
+            }
 
             let (inst, inst_size): (Instruction, u64) = match decode(raw4) {
                 Ok(i)  => (i, 4),
@@ -1426,6 +1814,114 @@ mod tests {
 
         assert_eq!(next_pc, ram + 8, "JAL target should be pc+8");
         assert_eq!(cpu.regs[1], ram + 4, "JAL link register should be pc+4");
+    }
+
+    // ── RVC tests ───────────────────────────────────────────────────────────
+    //
+    // C.ADDI x1, x1, +1  (Q1 funct3=000, rd=1, imm=1)
+    // Encoding: funct3=000|bit12=0|rd=1|nzimm[4:0]=00001|01 = 0x0085
+    #[test]
+    fn rvc_caddi() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 41;
+        cpu.bus.store(ram,   2, 0x0085u64).unwrap(); // C.ADDI x1, x1, 1
+        cpu.bus.store(ram+2, 4, 0x00000073u64).unwrap(); // ECALL (slow-path sentinel)
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).expect("RVC block must be compiled");
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[1], 42, "C.ADDI x1,x1,1 must produce 42");
+        assert_eq!(next_pc, ram + 2, "block must end at ECALL address");
+    }
+
+    // C.MV x1, x2  (Q2 funct3=100, bit12=0, rd=1, rs2=2)
+    // Encoding: 100|0|00001|00010|10 = 0x808A
+    #[test]
+    fn rvc_cmv() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 42;
+        cpu.bus.store(ram,   2, 0x808Au64).unwrap(); // C.MV x1, x2
+        cpu.bus.store(ram+2, 4, 0x00000073u64).unwrap();
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[1], 42, "C.MV x1,x2 must copy regs[2] to regs[1]");
+        assert_eq!(next_pc, ram + 2);
+    }
+
+    // C.BEQZ x8, +4  (Q1 funct3=110, rs1'=0→x8, imm[2:1]=10→offset 4)
+    // Encoding: 110|0|00|000|00|10|0|01 = 0xC011
+    #[test]
+    fn rvc_cbeqz_taken() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[8] = 0; // x8 == 0 → branch taken
+        cpu.bus.store(ram,   2, 0xC011u64).unwrap(); // C.BEQZ x8, +4
+        cpu.bus.store(ram+2, 4, 0x00000073u64).unwrap(); // ECALL at fall-through
+        cpu.bus.store(ram+4, 4, 0x00000013u64).unwrap(); // NOP at target
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, ram + 4, "C.BEQZ taken → pc+4");
+    }
+
+    #[test]
+    fn rvc_cbeqz_not_taken() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[8] = 1; // x8 != 0 → not taken
+        cpu.bus.store(ram,   2, 0xC011u64).unwrap(); // C.BEQZ x8, +4
+        cpu.bus.store(ram+2, 4, 0x00000073u64).unwrap();
+        cpu.bus.store(ram+4, 4, 0x00000013u64).unwrap();
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(next_pc, ram + 2, "C.BEQZ not taken → fall-through");
+    }
+
+    // C.SDSP sd x1, 8(x2)  then  C.LDSP ld x3, 8(x2) — memory round-trip
+    // C.SDSP: Q2 funct3=111, uimm[5:3]=001, uimm[8:6]=000, rs2=1 → 0xE406
+    // C.LDSP: Q2 funct3=011, bit12=0, rd=3, uimm[4:3]=01, uimm[8:6]=000 → 0x60E2
+    #[test]
+    fn rvc_ldsp_sdsp_roundtrip() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0xCAFE_BABE_1234_5678;
+        cpu.regs[2] = ram + 0x100; // sp
+        cpu.regs[3] = 0;
+
+        // C.SDSP sd x1, 8(x2)
+        // uimm[5:3]=bits[12:10]=001, uimm[8:6]=bits[9:7]=000, rs2=bits[6:2]=00001
+        // raw16 = (111<<13)|(001<<10)|(000<<7)|(00001<<2)|10 = 0xE406
+        cpu.bus.store(ram,   2, 0xE406u64).unwrap();
+        // C.LDSP ld x3, 8(x2)
+        // rd=3(00011), bit12=uimm[5]=0, bits[6:5]=uimm[4:3]=01, bits[4:2]=uimm[8:6]=000
+        // raw16 = (011<<13)|(0<<12)|(00011<<7)|(0<<6)|(1<<5)|(000<<2)|10
+        //       = 24576+0+384+0+32+0+2 = 24994 = 0x61A2
+        cpu.bus.store(ram+2, 2, 0x61A2u64).unwrap();
+        cpu.bus.store(ram+4, 4, 0x00000073u64).unwrap(); // ECALL
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[3], 0xCAFE_BABE_1234_5678, "C.LDSP must load value written by C.SDSP");
+        assert_eq!(next_pc, ram + 4);
     }
 
     #[test]
