@@ -88,7 +88,7 @@ impl Mmu {
         // 3-level Sv39 page table walk. Priv §4.3.2.
         // VA layout: VPN[2]=bits[38:30], VPN[1]=bits[29:21], VPN[0]=bits[20:12]
         let vpn_parts = [(addr >> 30) & 0x1FF, (addr >> 21) & 0x1FF, (addr >> 12) & 0x1FF];
-        let mut table_pa = (satp & 0x00FF_FFFF_FFFF) << 12;
+        let mut table_pa = (satp & 0x0FFF_FFFF_FFFF) << 12;
 
         for level in 0usize..3 {
             let pte_addr = table_pa + vpn_parts[level] * 8;
@@ -101,7 +101,7 @@ impl Mmu {
 
             if pte & (PTE_R | PTE_X) != 0 {
                 // Leaf PTE found at this level
-                let ppn = (pte >> 10) & 0x00FF_FFFF_FFFF;
+                let ppn = (pte >> 10) & 0x0FFF_FFFF_FFFF;
 
                 // Superpage alignment check: lower VPN bits of PPN must be zero. Priv §4.3.2 step 5.
                 let rem = 2 - level; // 0=4K, 1=2MB, 2=1GB
@@ -137,7 +137,7 @@ impl Mmu {
             }
 
             // Non-leaf: descend to next level
-            table_pa = ((pte >> 10) & 0x00FF_FFFF_FFFF) << 12;
+            table_pa = ((pte >> 10) & 0x0FFF_FFFF_FFFF) << 12;
         }
 
         Err(MmuFault { cause: pf_cause(access), tval: addr })
