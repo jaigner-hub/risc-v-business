@@ -150,7 +150,7 @@ impl Csr {
                                     | (val         &  0x0000_0000_000D_E162),
             0x104 => self.mie  = (self.mie  & !0x222) | (val & 0x222),
             0x106 => {}                 // scounteren: writes ignored
-            0x144 => self.mip  = (self.mip  & !0x222) | (val & 0x222),
+            0x144 => self.mip  = (self.mip  & !0x002) | (val & 0x002),
             0x302 => self.medeleg = val,
             0x303 => self.mideleg = val,
             _ => {} // unimplemented or read-only: silently ignore (Priv §2.1)
