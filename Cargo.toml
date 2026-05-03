@@ -1,0 +1,20 @@
+[package]
+name = "riscv-emu"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "riscv_emu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "riscv-emu"
+path = "src/main.rs"
+
+[dependencies]
+clap    = { version = "4", features = ["derive"] }
+anyhow  = "1"
+goblin  = "0.8"
+
+[profile.release]
+opt-level = 3
