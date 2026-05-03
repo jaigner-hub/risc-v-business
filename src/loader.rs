@@ -25,7 +25,9 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
         if ph.p_type != PT_LOAD { continue; }
         let file_start = ph.p_offset as usize;
         let file_end   = file_start + ph.p_filesz as usize;
-        let mem_addr   = ph.p_paddr;
+        // p_paddr: physical-memory test ELFs (rv64ui-p-*) are linked flat;
+        // MMU-enabled phases still load to physical addresses via Sv39.
+        let mem_addr = ph.p_paddr;
 
         if mem_addr < RAM_BASE {
             return Err(anyhow!("PT_LOAD segment at {mem_addr:#x} is below RAM base {RAM_BASE:#x}"));
@@ -35,6 +37,12 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
             .ok_or_else(|| anyhow!("PT_LOAD segment out of file bounds"))?;
 
         let off = (mem_addr - RAM_BASE) as usize;
+        if off + segment.len() > RAM_SIZE {
+            return Err(anyhow!(
+                "PT_LOAD segment [{mem_addr:#x}..{:#x}) exceeds RAM",
+                mem_addr + ph.p_filesz
+            ));
+        }
         bus.ram_mut()[off..off + segment.len()].copy_from_slice(segment);
     }
 
