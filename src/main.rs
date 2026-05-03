@@ -94,33 +94,57 @@ fn main() -> Result<()> {
         }
     });
 
+    use riscv_emu::jit::JitCache;
+    let mut jit = JitCache::new();
+    let mut tick: u64 = 0;
+
     loop {
-        cpu.step()?;
-        // Drain stdin → UART RX only after the shell prompt and DSR query are handled.
-        if cpu.bus.uart.stdin_ready {
-            while let Ok(byte) = stdin_rx.try_recv() {
-                cpu.bus.uart.push_rx(byte);
+        match jit.get(cpu.pc) {
+            Some(f) => {
+                let next = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+                if next == u64::MAX {
+                    cpu.step()?;
+                } else {
+                    cpu.pc = next;
+                }
+            }
+            None => {
+                cpu.step()?;
+                let pc = cpu.pc;
+                jit.compile(&mut cpu, pc);
             }
         }
-        if cpu.bus.clint.tick() {
-            cpu.csr.mip |= 1 << 7;    // set MTIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 7); // clear MTIP
+
+        if cpu.jit_invalidate {
+            cpu.jit_invalidate = false;
+            jit.invalidate();
         }
-        // Sstc: STIP follows mtime vs stimecmp. Priv §15.
-        if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
-            cpu.csr.mip |= 1 << 5;    // set STIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 5); // clear STIP
-        }
-        // SEIP: set when UART has a pending interrupt routed through PLIC to S-mode.
-        // DTB declares UART at PLIC IRQ 10 (QEMU virt convention).
-        let uart_irq = cpu.bus.uart.irq_pending();
-        cpu.bus.plic.set_pending(10, uart_irq);
-        if cpu.bus.plic.has_interrupt() {
-            cpu.csr.mip |= 1 << 9;    // set SEIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 9); // clear SEIP
+
+        tick = tick.wrapping_add(1);
+        if tick & 1023 == 0 {
+            // Drain stdin → UART RX only after the shell prompt is ready.
+            if cpu.bus.uart.stdin_ready {
+                while let Ok(byte) = stdin_rx.try_recv() {
+                    cpu.bus.uart.push_rx(byte);
+                }
+            }
+            if cpu.bus.clint.tick() {
+                cpu.csr.mip |= 1 << 7;
+            } else {
+                cpu.csr.mip &= !(1u64 << 7);
+            }
+            if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
+                cpu.csr.mip |= 1 << 5;
+            } else {
+                cpu.csr.mip &= !(1u64 << 5);
+            }
+            let uart_irq = cpu.bus.uart.irq_pending();
+            cpu.bus.plic.set_pending(10, uart_irq);
+            if cpu.bus.plic.has_interrupt() {
+                cpu.csr.mip |= 1 << 9;
+            } else {
+                cpu.csr.mip &= !(1u64 << 9);
+            }
         }
     }
 }
