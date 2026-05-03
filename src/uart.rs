@@ -4,13 +4,11 @@ use std::io::{self, Write};
 pub struct Uart16550 {
     ier: u8,
     rx_buf: VecDeque<u8>,
-    // Two-phase detection in TX output:
-    //   phase 1 — wait for "# " (shell prompt); prevents bytes arriving during kernel boot
-    //   phase 2 — detect and auto-respond to \033[6n (ANSI DSR cursor query);
-    //              prevents readline consuming stdin bytes while waiting for cursor position
-    prompt_tail: u8,
+    // Intercept every \033[6n (ANSI DSR cursor query) before it reaches the host
+    // terminal — suppress the bytes, inject \033[1;1R into rx_buf.  Active for the
+    // entire session because the shell re-sends DSR before every prompt.
     dsr_state: u8,
-    pub stdin_ready: bool,  // true once phase 2 is complete — safe to inject stdin bytes
+    pub stdin_ready: bool,  // true after first DSR — safe to inject stdin bytes
 }
 
 impl Uart16550 {
@@ -18,7 +16,6 @@ impl Uart16550 {
         Self {
             ier: 0,
             rx_buf: VecDeque::new(),
-            prompt_tail: 0,
             dsr_state: 0,
             stdin_ready: false,
         }
@@ -66,37 +63,28 @@ impl Uart16550 {
             return;
         }
         let byte = val as u8;
+
+        // Intercept \033[6n (ANSI DSR cursor query) before printing — the host terminal
+        // must never see it or it sends a real CPR that leaks into the shell as input.
+        // Active for the entire session: the shell re-sends DSR before every prompt.
+        match (self.dsr_state, byte) {
+            (0, 0x1B) => { self.dsr_state = 1; return; }
+            (1, b'[') => { self.dsr_state = 2; return; }
+            (2, b'6') => { self.dsr_state = 3; return; }
+            (3, b'n') => {
+                for &b in b"\x1b[1;1R" { self.rx_buf.push_back(b); }
+                self.stdin_ready = true;
+                self.dsr_state = 0;
+                return;
+            }
+            // Sequence broke — flush buffered prefix then fall through to print byte
+            (1, _) => { print!("\x1b"); self.dsr_state = 0; }
+            (2, _) => { print!("\x1b["); self.dsr_state = 0; }
+            (3, _) => { print!("\x1b[6"); self.dsr_state = 0; }
+            _ => {}
+        }
+
         print!("{}", byte as char);
         let _ = io::stdout().flush();
-
-        if self.stdin_ready {
-            return;
-        }
-
-        // Phase 1: wait for "# " (shell prompt ready).
-        // Phase 2: watch for \033[6n (ANSI DSR query) and auto-respond so readline
-        //          gets a valid cursor position before we inject any user input.
-        match self.prompt_tail {
-            0 | 1 => {
-                self.prompt_tail = if byte == b'#' { 1 } else if self.prompt_tail == 1 && byte == b' ' { 2 } else { 0 };
-            }
-            _ => {
-                // Prompt seen — now wait for \033[6n
-                self.dsr_state = match (self.dsr_state, byte) {
-                    (0, 0x1B) => 1,
-                    (1, b'[') => 2,
-                    (2, b'6') => 3,
-                    (3, b'n') => {
-                        // Respond with ESC [ 1 ; 1 R before any stdin bytes arrive
-                        for &b in b"\x1b[1;1R" {
-                            self.rx_buf.push_back(b);
-                        }
-                        self.stdin_ready = true;
-                        0
-                    }
-                    _ => 0,
-                };
-            }
-        }
     }
 }

@@ -10,6 +10,47 @@ fn sext(val: u64, bit: u32) -> u64 {
     (((val << shift) as i64) >> shift) as u64
 }
 
+fn fmin_s(a: f32, b: f32) -> f32 {
+    if a.is_nan() { b } else if b.is_nan() { a }
+    else if a == 0.0 && b == 0.0 && a.is_sign_negative() { a } else { a.min(b) }
+}
+fn fmax_s(a: f32, b: f32) -> f32 {
+    if a.is_nan() { b } else if b.is_nan() { a }
+    else if a == 0.0 && b == 0.0 && b.is_sign_negative() { a } else { a.max(b) }
+}
+fn fmin_d(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a }
+    else if a == 0.0 && b == 0.0 && a.is_sign_negative() { a } else { a.min(b) }
+}
+fn fmax_d(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a }
+    else if a == 0.0 && b == 0.0 && b.is_sign_negative() { a } else { a.max(b) }
+}
+fn fclass_s(v: f32) -> u64 {
+    let b = v.to_bits();
+    if v.is_nan()            { if b & (1 << 22) != 0 { 1 << 9 } else { 1 << 8 } }
+    else if v == f32::NEG_INFINITY { 1 << 0 }
+    else if b >> 31 != 0 && v.is_normal()    { 1 << 1 }
+    else if b >> 31 != 0 && v.is_subnormal() { 1 << 2 }
+    else if b >> 31 != 0                     { 1 << 3 } // -0
+    else if v.is_subnormal()                 { 1 << 5 }
+    else if v.is_normal()                    { 1 << 6 }
+    else if v == f32::INFINITY               { 1 << 7 }
+    else                                     { 1 << 4 } // +0
+}
+fn fclass_d(v: f64) -> u64 {
+    let b = v.to_bits();
+    if v.is_nan()            { if b & (1 << 51) != 0 { 1 << 9 } else { 1 << 8 } }
+    else if v == f64::NEG_INFINITY { 1 << 0 }
+    else if b >> 63 != 0 && v.is_normal()    { 1 << 1 }
+    else if b >> 63 != 0 && v.is_subnormal() { 1 << 2 }
+    else if b >> 63 != 0                     { 1 << 3 } // -0
+    else if v.is_subnormal()                 { 1 << 5 }
+    else if v.is_normal()                    { 1 << 6 }
+    else if v == f64::INFINITY               { 1 << 7 }
+    else                                     { 1 << 4 } // +0
+}
+
 pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     let pc = cpu.pc;
 
@@ -247,7 +288,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.fregs[fd] = v, // store as zero-extended u64 (low 32 bits)
+                    Ok(v)  => cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000 | (v & 0xFFFF_FFFF), // NaN-boxed
                 }
             }
         },
@@ -281,6 +322,138 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 }
             }
         },
+
+        // --- FP register operations (OP-FP opcode 0x53) ---
+        // Spec: Unprivileged §11.6 (F), §12.6 (D). Rounding modes ignored (Rust uses RNE).
+        Instruction::OpFp { funct7, rs2, rs1, rm, rd } => {
+            // Bit-cast helpers — never allocate; the compiler inlines these.
+            let fd  = |v: u64| f64::from_bits(v);
+            let db  = |v: f64| f64::to_bits(v);
+            // NaN-boxed f32: upper 32 bits must be 0xFFFF_FFFF per spec §12.2.
+            let fs  = |v: u64| -> f32 { if v >> 32 == 0xFFFF_FFFF { f32::from_bits(v as u32) } else { f32::NAN } };
+            let sb  = |v: f32| -> u64 { 0xFFFF_FFFF_0000_0000 | f32::to_bits(v) as u64 };
+            match funct7 {
+                0x00 => cpu.fregs[rd] = sb(fs(cpu.fregs[rs1]) + fs(cpu.fregs[rs2])),        // FADD.S
+                0x01 => cpu.fregs[rd] = db(fd(cpu.fregs[rs1]) + fd(cpu.fregs[rs2])),        // FADD.D
+                0x04 => cpu.fregs[rd] = sb(fs(cpu.fregs[rs1]) - fs(cpu.fregs[rs2])),        // FSUB.S
+                0x05 => cpu.fregs[rd] = db(fd(cpu.fregs[rs1]) - fd(cpu.fregs[rs2])),        // FSUB.D
+                0x08 => cpu.fregs[rd] = sb(fs(cpu.fregs[rs1]) * fs(cpu.fregs[rs2])),        // FMUL.S
+                0x09 => cpu.fregs[rd] = db(fd(cpu.fregs[rs1]) * fd(cpu.fregs[rs2])),        // FMUL.D
+                0x0C => cpu.fregs[rd] = sb(fs(cpu.fregs[rs1]) / fs(cpu.fregs[rs2])),        // FDIV.S
+                0x0D => cpu.fregs[rd] = db(fd(cpu.fregs[rs1]) / fd(cpu.fregs[rs2])),        // FDIV.D
+                0x2C => cpu.fregs[rd] = sb(fs(cpu.fregs[rs1]).sqrt()),                       // FSQRT.S
+                0x2D => cpu.fregs[rd] = db(fd(cpu.fregs[rs1]).sqrt()),                       // FSQRT.D
+                0x10 => { // FSGNJ{N,X}.S — sign-injection, funct3 in rm field
+                    let sign = match rm {
+                        0 =>  cpu.fregs[rs2] & 0x8000_0000,
+                        1 => !cpu.fregs[rs2] & 0x8000_0000,
+                        2 => (cpu.fregs[rs1] ^ cpu.fregs[rs2]) & 0x8000_0000,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    };
+                    cpu.fregs[rd] = 0xFFFF_FFFF_0000_0000 | (cpu.fregs[rs1] & 0x7FFF_FFFF) | sign;
+                }
+                0x11 => { // FSGNJ{N,X}.D
+                    let sign = match rm {
+                        0 =>  cpu.fregs[rs2] & 0x8000_0000_0000_0000,
+                        1 => !cpu.fregs[rs2] & 0x8000_0000_0000_0000,
+                        2 => (cpu.fregs[rs1] ^ cpu.fregs[rs2]) & 0x8000_0000_0000_0000,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    };
+                    cpu.fregs[rd] = (cpu.fregs[rs1] & 0x7FFF_FFFF_FFFF_FFFF) | sign;
+                }
+                0x14 => match rm { // FMIN/FMAX.S
+                    0 => cpu.fregs[rd] = sb(fmin_s(fs(cpu.fregs[rs1]), fs(cpu.fregs[rs2]))),
+                    1 => cpu.fregs[rd] = sb(fmax_s(fs(cpu.fregs[rs1]), fs(cpu.fregs[rs2]))),
+                    _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+                }
+                0x15 => match rm { // FMIN/FMAX.D
+                    0 => cpu.fregs[rd] = db(fmin_d(fd(cpu.fregs[rs1]), fd(cpu.fregs[rs2]))),
+                    1 => cpu.fregs[rd] = db(fmax_d(fd(cpu.fregs[rs1]), fd(cpu.fregs[rs2]))),
+                    _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+                }
+                0x20 => cpu.fregs[rd] = sb(fd(cpu.fregs[rs1]) as f32),                      // FCVT.S.D
+                0x21 => cpu.fregs[rd] = db(fs(cpu.fregs[rs1]) as f64),                      // FCVT.D.S
+                0x50 => { // FLE/FLT/FEQ.S
+                    let (a, b) = (fs(cpu.fregs[rs1]), fs(cpu.fregs[rs2]));
+                    cpu.set_reg(rd, match rm {
+                        0 => (a <= b) as u64, 1 => (a < b) as u64, 2 => (a == b) as u64,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    });
+                }
+                0x51 => { // FLE/FLT/FEQ.D
+                    let (a, b) = (fd(cpu.fregs[rs1]), fd(cpu.fregs[rs2]));
+                    cpu.set_reg(rd, match rm {
+                        0 => (a <= b) as u64, 1 => (a < b) as u64, 2 => (a == b) as u64,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    });
+                }
+                0x60 => { // FCVT.{W,WU,L,LU}.S
+                    let a = fs(cpu.fregs[rs1]);
+                    cpu.set_reg(rd, match rs2 {
+                        0 => a as i32 as i64 as u64, 1 => a as u32 as u64,
+                        2 => a as i64 as u64,        3 => a as u64,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    });
+                }
+                0x61 => { // FCVT.{W,WU,L,LU}.D
+                    let a = fd(cpu.fregs[rs1]);
+                    cpu.set_reg(rd, match rs2 {
+                        0 => a as i32 as i64 as u64, 1 => a as u32 as u64,
+                        2 => a as i64 as u64,        3 => a as u64,
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    });
+                }
+                0x68 => { // FCVT.S.{W,WU,L,LU}
+                    cpu.fregs[rd] = match rs2 {
+                        0 => sb(cpu.regs[rs1] as i32 as f32), 1 => sb(cpu.regs[rs1] as u32 as f32),
+                        2 => sb(cpu.regs[rs1] as i64 as f32), 3 => sb(cpu.regs[rs1] as f32),
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    };
+                }
+                0x69 => { // FCVT.D.{W,WU,L,LU}
+                    cpu.fregs[rd] = match rs2 {
+                        0 => db(cpu.regs[rs1] as i32 as f64), 1 => db(cpu.regs[rs1] as u32 as f64),
+                        2 => db(cpu.regs[rs1] as i64 as f64), 3 => db(cpu.regs[rs1] as f64),
+                        _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; return Ok(()); }
+                    };
+                }
+                0x70 => match rm { // FMV.X.W (sign-extended) / FCLASS.S
+                    0 => cpu.set_reg(rd, cpu.fregs[rs1] as i32 as i64 as u64),
+                    1 => cpu.set_reg(rd, fclass_s(fs(cpu.fregs[rs1]))),
+                    _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+                }
+                0x71 => match rm { // FMV.X.D / FCLASS.D
+                    0 => cpu.set_reg(rd, cpu.fregs[rs1]),
+                    1 => cpu.set_reg(rd, fclass_d(fd(cpu.fregs[rs1]))),
+                    _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+                }
+                0x78 => cpu.fregs[rd] = 0xFFFF_FFFF_0000_0000 | (cpu.regs[rs1] & 0xFFFF_FFFF), // FMV.W.X
+                0x79 => cpu.fregs[rd] = cpu.regs[rs1],                                          // FMV.D.X
+                _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+            }
+        }
+
+        // --- Fused multiply-add (R4-type) ---
+        // FMADD: rd=rs1×rs2+rs3  FMSUB: rd=rs1×rs2-rs3
+        // FNMSUB: rd=-(rs1×rs2)+rs3  FNMADD: rd=-(rs1×rs2)-rs3
+        // Spec: Unprivileged §11.6, §12.6.
+        Instruction::Fma { opcode, fmt, rs3, rs2, rs1, rd } => {
+            let fd  = |v: u64| f64::from_bits(v);
+            let db  = |v: f64| f64::to_bits(v);
+            let fs  = |v: u64| -> f32 { if v >> 32 == 0xFFFF_FFFF { f32::from_bits(v as u32) } else { f32::NAN } };
+            let sb  = |v: f32| -> u64 { 0xFFFF_FFFF_0000_0000 | f32::to_bits(v) as u64 };
+            match (fmt, opcode) {
+                (0, 0x43) => cpu.fregs[rd] = sb( fs(cpu.fregs[rs1]).mul_add( fs(cpu.fregs[rs2]),  fs(cpu.fregs[rs3]))),
+                (0, 0x47) => cpu.fregs[rd] = sb( fs(cpu.fregs[rs1]).mul_add( fs(cpu.fregs[rs2]), -fs(cpu.fregs[rs3]))),
+                (0, 0x4B) => cpu.fregs[rd] = sb((-fs(cpu.fregs[rs1])).mul_add(fs(cpu.fregs[rs2]), fs(cpu.fregs[rs3]))),
+                (0, 0x4F) => cpu.fregs[rd] = sb((-fs(cpu.fregs[rs1])).mul_add(fs(cpu.fregs[rs2]), -fs(cpu.fregs[rs3]))),
+                (1, 0x43) => cpu.fregs[rd] = db( fd(cpu.fregs[rs1]).mul_add( fd(cpu.fregs[rs2]),  fd(cpu.fregs[rs3]))),
+                (1, 0x47) => cpu.fregs[rd] = db( fd(cpu.fregs[rs1]).mul_add( fd(cpu.fregs[rs2]), -fd(cpu.fregs[rs3]))),
+                (1, 0x4B) => cpu.fregs[rd] = db((-fd(cpu.fregs[rs1])).mul_add(fd(cpu.fregs[rs2]), fd(cpu.fregs[rs3]))),
+                (1, 0x4F) => cpu.fregs[rd] = db((-fd(cpu.fregs[rs1])).mul_add(fd(cpu.fregs[rs2]), -fd(cpu.fregs[rs3]))),
+                _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
+            }
+        }
 
         // --- Branches ---
         // Misaligned branch targets trap before the instruction commits. Spec: Priv §3.1.15

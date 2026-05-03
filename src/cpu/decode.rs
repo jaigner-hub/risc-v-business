@@ -131,12 +131,15 @@ pub enum Instruction {
     Csrrwi { rd: usize, uimm: u32, csr: u16 },
     Csrrsi { rd: usize, uimm: u32, csr: u16 },
     Csrrci { rd: usize, uimm: u32, csr: u16 },
-    // --- F/D extension load/store (Phase 5 minimal: register save/restore only) ---
-    // Spec: Unprivileged §11 (F), §12 (D). No FP arithmetic implemented.
+    // --- F/D extension (Spec: Unprivileged §11 F, §12 D) ---
     Flw { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=010
     Fld { fd: usize, rs1: usize, imm: i64 },  // opcode 0x07, funct3=011
     Fsw { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=010
     Fsd { rs1: usize, fs2: usize, imm: i64 }, // opcode 0x27, funct3=011
+    // OP-FP: all FP register-register operations — arithmetic, conversions, moves, compares.
+    OpFp { funct7: u8, rs2: usize, rs1: usize, rm: u8, rd: usize }, // opcode 0x53
+    // R4-type fused multiply-add: FMADD/FMSUB/FNMSUB/FNMADD
+    Fma  { opcode: u8, fmt: u8, rs3: usize, rs2: usize, rs1: usize, rd: usize }, // 0x43/0x47/0x4B/0x4F
 }
 
 /// Sign-extend the high 12 bits of inst (I-type immediate).
@@ -289,6 +292,15 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
+        // OP-FP: opcode 0x53. rm field (funct3) doubles as sub-opcode for non-arithmetic ops.
+        // Spec: Unprivileged §11.6 (F), §12.6 (D).
+        0x53 => Ok(Instruction::OpFp { funct7: funct7 as u8, rs2, rs1, rm: funct3 as u8, rd }),
+        // R4-type fused multiply-add. Spec: Unprivileged §11.6, §12.6.
+        0x43 | 0x47 | 0x4B | 0x4F => {
+            let fmt = ((inst >> 25) & 0x3) as u8;
+            let rs3 = ((inst >> 27) & 0x1F) as usize;
+            Ok(Instruction::Fma { opcode: opcode as u8, fmt, rs3, rs2, rs1, rd })
+        }
         // Stores: opcode 0x23
         0x23 => {
             let imm = s_imm(inst);
