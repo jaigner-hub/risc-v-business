@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use riscv_emu::{cpu::Cpu, dtb, loader};
+use riscv_emu::{cpu::Cpu, dtb, dtb::INITRD_BASE, loader};
 
 #[derive(Parser)]
 #[command(name = "riscv-emu", about = "RV64I emulator")]
@@ -12,7 +12,7 @@ struct Args {
     #[arg(long)]
     trace: bool,
 
-    /// Load embedded VIRT_DTB and boot in OpenSBI mode (sets a0/a1, ticks CLINT)
+    /// Build FDT programmatically and boot in OpenSBI mode (sets a0/a1, ticks CLINT)
     #[arg(long)]
     dtb: bool,
 
@@ -28,7 +28,6 @@ struct Args {
 const DTB_BASE: u64 = 0x8220_0000;
 const RAM_BASE: u64 = 0x8000_0000;
 const KERNEL_BASE: u64 = 0x8020_0000;
-const INITRD_BASE: u64 = 0x8600_0000;
 
 fn load_raw(bus: &mut riscv_emu::bus::Bus, path: &str, phys_addr: u64) -> Result<usize> {
     let bytes = std::fs::read(path)
@@ -66,11 +65,12 @@ fn main() -> Result<()> {
     }
 
     if args.dtb {
-        let dtb_bytes = dtb::VIRT_DTB;
+        let dtb_bytes = dtb::build_dtb(initrd_size)
+            .context("failed to build device tree")?;
         let dtb_off = (DTB_BASE - RAM_BASE) as usize;
-        cpu.bus.ram_mut()[dtb_off..dtb_off + dtb_bytes.len()].copy_from_slice(dtb_bytes);
-        cpu.set_reg(10, 0);              // a0 = hart ID 0
-        cpu.set_reg(11, DTB_BASE);       // a1 = FDT pointer
+        cpu.bus.ram_mut()[dtb_off..dtb_off + dtb_bytes.len()].copy_from_slice(&dtb_bytes);
+        cpu.set_reg(10, 0);        // a0 = hart ID 0
+        cpu.set_reg(11, DTB_BASE); // a1 = FDT pointer
     }
 
     loop {
