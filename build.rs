@@ -55,7 +55,7 @@ fn main() {
     if !found {
         code.push_str(
             "#[test]\nfn _no_riscv_tests_vendored() {\n    \
-                panic!(\"No rv64ui-p-* ELFs found in tests/riscv-tests/. \
+                panic!(\"No riscv-tests ELFs found in tests/riscv-tests/. \
                 Run scripts/fetch-riscv-tests.sh first.\");\n}\n"
         );
     }
