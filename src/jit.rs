@@ -180,6 +180,74 @@ fn emit_slow_path(ops: &mut Assembler) {
     );
 }
 
+fn emit_load(
+    ops: &mut Assembler,
+    rd: usize,
+    rs1: usize,
+    imm: i64,
+    helper: unsafe extern "sysv64" fn(*mut Cpu, u64) -> u64,
+) {
+    let rs1_off = (rs1 * 8) as i32;
+    let rd_off  = (rd  * 8) as i32;
+    let imm32   = imm as i32;
+    let helper_addr = helper as i64;
+    let fault_label = ops.new_dynamic_label();
+    let skip_fault  = ops.new_dynamic_label();
+    dynasm!(ops
+        ; .arch x64
+        ; mov rsi, QWORD [r15 + rs1_off]
+        ; add rsi, imm32
+        ; mov rdi, r14
+        ; mov rax, QWORD helper_addr
+        ; call rax
+        ; cmp rax, -1i32
+        ; je =>fault_label
+    );
+    if rd != 0 {
+        dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax);
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; jmp =>skip_fault
+        ; =>fault_label
+    );
+    emit_slow_path(ops);
+    dynasm!(ops ; .arch x64 ; =>skip_fault);
+}
+
+fn emit_store(
+    ops: &mut Assembler,
+    rs1: usize,
+    rs2: usize,
+    imm: i64,
+    helper: unsafe extern "sysv64" fn(*mut Cpu, u64, u64) -> u64,
+) {
+    let rs1_off = (rs1 * 8) as i32;
+    let rs2_off = (rs2 * 8) as i32;
+    let imm32   = imm as i32;
+    let helper_addr = helper as i64;
+    let fault_label = ops.new_dynamic_label();
+    let skip_fault  = ops.new_dynamic_label();
+    dynasm!(ops
+        ; .arch x64
+        ; mov rsi, QWORD [r15 + rs1_off]
+        ; add rsi, imm32
+        ; mov rdx, QWORD [r15 + rs2_off]
+        ; mov rdi, r14
+        ; mov rax, QWORD helper_addr
+        ; call rax
+        ; cmp rax, -1i32
+        ; je =>fault_label
+    );
+    dynasm!(ops
+        ; .arch x64
+        ; jmp =>skip_fault
+        ; =>fault_label
+    );
+    emit_slow_path(ops);
+    dynasm!(ops ; .arch x64 ; =>skip_fault);
+}
+
 /// R-type op pattern: rax = regs[rs1], rcx = regs[rs2], op(rax, rcx), regs[rd] = rax (if rd!=0).
 fn emit_r_op<F: FnOnce(&mut Assembler)>(
     ops: &mut Assembler, rd: usize, rs1: usize, rs2: usize, op: F
@@ -836,6 +904,64 @@ impl JitCache {
                     if rd != 0 { dynasm!(ops ; .arch x64 ; mov QWORD [r15 + rd_off], rax); }
                 }
 
+                // ── Loads ──────────────────────────────────────────────────────
+                Instruction::Lb { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8);
+                    if rd != 0 {
+                        let rd_off = (rd * 8) as i32;
+                        dynasm!(ops ; .arch x64
+                            ; movsx rax, BYTE [r15 + rd_off]
+                            ; mov QWORD [r15 + rd_off], rax
+                        );
+                    }
+                }
+                Instruction::Lh { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16);
+                    if rd != 0 {
+                        let rd_off = (rd * 8) as i32;
+                        dynasm!(ops ; .arch x64
+                            ; movsx rax, WORD [r15 + rd_off]
+                            ; mov QWORD [r15 + rd_off], rax
+                        );
+                    }
+                }
+                Instruction::Lw { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32);
+                    if rd != 0 {
+                        let rd_off = (rd * 8) as i32;
+                        dynasm!(ops ; .arch x64
+                            ; movsxd rax, DWORD [r15 + rd_off]
+                            ; mov QWORD [r15 + rd_off], rax
+                        );
+                    }
+                }
+                Instruction::Ld { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load64);
+                }
+                Instruction::Lbu { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load8);
+                }
+                Instruction::Lhu { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load16);
+                }
+                Instruction::Lwu { rd, rs1, imm } => {
+                    emit_load(&mut ops, rd, rs1, imm as i64, jit_load32);
+                }
+
+                // ── Stores ─────────────────────────────────────────────────────
+                Instruction::Sb { rs1, rs2, imm } => {
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store8);
+                }
+                Instruction::Sh { rs1, rs2, imm } => {
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store16);
+                }
+                Instruction::Sw { rs1, rs2, imm } => {
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store32);
+                }
+                Instruction::Sd { rs1, rs2, imm } => {
+                    emit_store(&mut ops, rs1, rs2, imm as i64, jit_store64);
+                }
+
                 // Everything else: slow path (end block)
                 _ => {
                     emit_slow_path(&mut ops);
@@ -864,7 +990,7 @@ mod tests {
     use dynasmrt::{dynasm, DynasmApi, x64::Assembler};
 
     fn make_cpu() -> Cpu {
-        Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false)
+        Cpu::new(Bus::new(4096, 0x8000_0000), 0x8000_0000, false)
     }
 
     #[test]
@@ -1063,5 +1189,32 @@ mod tests {
         let f = jit.get(ram).unwrap();
         unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
         assert_eq!(cpu.regs[3], 99);
+    }
+
+    // SW x1, 0(x2)  encoding: funct7_imm=0, rs2=1, rs1=2, funct3=2, imm_lo=0, opcode=0x23
+    // S-type: imm[11:5]=0000000, rs2=00001, rs1=00010, funct3=010, imm[4:0]=00000, opcode=0100011
+    // = 0x00112023
+    // LW x3, 0(x2)  encoding: imm=0, rs1=2, funct3=2, rd=3, opcode=0x03
+    // = (0<<20)|(2<<15)|(2<<12)|(3<<7)|0x03 = 0x00012183
+    #[test]
+    fn jit_load_store() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0xDEAD_BEEF;
+        cpu.regs[2] = ram + 0x100;      // store target address in x2
+
+        cpu.bus.store(ram,      4, 0x00112023u64).unwrap(); // SW x1, 0(x2)
+        cpu.bus.store(ram + 4,  4, 0x00012183u64).unwrap(); // LW x3, 0(x2)
+        cpu.bus.store(ram + 8,  4, 0x00000073u64).unwrap(); // ECALL (slow path)
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).unwrap();
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+
+        // LW sign-extends 32 bits; DEAD_BEEF = 0xDEAD_BEEF which sign-extended is 0xFFFF_FFFF_DEAD_BEEF
+        assert_eq!(cpu.regs[3], 0xFFFF_FFFF_DEAD_BEEFu64);
+        assert_eq!(next_pc, u64::MAX);
     }
 }
