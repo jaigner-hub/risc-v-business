@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use dynasmrt::{dynasm, DynasmApi, AssemblyOffset, ExecutableBuffer, x64::Assembler};
-use crate::cpu::decode::{decode, decode_rvc, Instruction};
+use crate::cpu::decode::{decode, Instruction};
 use crate::cpu::Cpu;
 
 /// Signature of every compiled basic block.
@@ -260,17 +260,12 @@ impl JitCache {
                 Err(_) => { emit_slow_path(&mut ops); break; }
             };
 
-            let (inst, inst_size): (Instruction, u64) = if raw4 & 0x3 != 0x3 {
-                // RVC (16-bit): send to slow path immediately
-                match decode_rvc(raw4 as u16) {
-                    Ok(i)  => (i, 2),
-                    Err(_) => { emit_slow_path(&mut ops); break; }
-                }
-            } else {
-                match decode(raw4) {
-                    Ok(i)  => (i, 4),
-                    Err(_) => { emit_slow_path(&mut ops); break; }
-                }
+            // RVC (16-bit): all fall to slow path in Phase 6a.
+            if raw4 & 0x3 != 0x3 { emit_slow_path(&mut ops); break; }
+
+            let (inst, inst_size): (Instruction, u64) = match decode(raw4) {
+                Ok(i)  => (i, 4),
+                Err(_) => { emit_slow_path(&mut ops); break; }
             };
 
             let next_seq = guest_pc.wrapping_add(inst_size);
