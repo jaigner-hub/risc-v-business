@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crate::cpu::{Cpu, decode::Instruction};
+use crate::cpu::{Cpu, PrivMode, decode::Instruction};
 
 /// Sign-extend a u64 value from bit `n` (0-indexed).
 /// Used for *W variants: sext(val, 31) sign-extends from bit 31.
@@ -239,39 +239,35 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::Fence => { /* NOP in Phase 1 — no memory-ordering concerns */ },
         Instruction::Wfi   => { /* NOP — no interrupts in Phase 1 */ },
 
-        // ECALL: deliver an environment-call-from-M-mode trap.
-        // Spec: Privileged §3.3.1, Table 3.6 — mcause = 11 for env-call from M-mode.
-        // mepc = pc of the ecall, then jump to mtvec (direct mode).
+        // ECALL: cause depends on current privilege mode. Priv §3.3.1 Table 3.6
+        // deliver_trap() handles medeleg delegation automatically.
         Instruction::Ecall => {
-            cpu.csr.trap_entry();
-            cpu.csr_write(CSR_MCAUSE, 11);
-            cpu.csr_write(CSR_MEPC, pc);
-            cpu.csr_write(CSR_MTVAL, 0);
-            // mtvec direct mode: bits[1:0] = 00 → pc = base. Vectored mode is rare for
-            // synchronous traps and not used by the test environment.
-            next_pc = cpu.csr_read(CSR_MTVEC) & !0b11;
+            let cause = match cpu.mode { PrivMode::U => 8, PrivMode::S => 9, PrivMode::M => 11 };
+            cpu.deliver_trap(cause, 0);
+            next_pc = cpu.pc;
         },
-        // EBREAK: also a trap, mcause = 3 (breakpoint).
+        // EBREAK: cause=3 (breakpoint). Uses deliver_trap so medeleg applies. Priv §3.3.1
         Instruction::Ebreak => {
-            cpu.csr.trap_entry();
-            cpu.csr_write(CSR_MCAUSE, 3);
-            cpu.csr_write(CSR_MEPC, pc);
-            cpu.csr_write(CSR_MTVAL, pc);
-            next_pc = cpu.csr_read(CSR_MTVEC) & !0b11;
+            cpu.deliver_trap(3, cpu.pc);
+            next_pc = cpu.pc;
         },
-        // MRET: return from a machine-mode trap. pc = mepc.
-        // Spec: Privileged §3.3.2. Restores MIE←MPIE, MPIE←1 via mret() helper.
+        // MRET: restore privilege to MPP, then jump to mepc. Priv §3.3.2
         Instruction::Mret => {
-            cpu.csr.mret();
+            let mpp = (cpu.csr.mstatus >> 11) & 3;
+            cpu.mode = match mpp { 0 => PrivMode::U, 1 => PrivMode::S, _ => PrivMode::M };
+            cpu.csr.mret(); // MIE←MPIE, MPIE←1, MPP←U
             next_pc = cpu.csr.mepc;
         },
-        // SRET: return from S-mode trap. Illegal if mstatus.TSR=1 (Priv §3.1.6.4).
+        // SRET: restore privilege to SPP, jump to sepc. Illegal when mstatus.TSR=1. Priv §4.1.1
         Instruction::Sret => {
             if (cpu.csr.mstatus >> 22) & 1 != 0 {
-                cpu.deliver_trap(2, 0x10200073);
+                cpu.deliver_trap(2, 0x10200073); // TSR=1: illegal instruction
                 next_pc = cpu.pc;
             } else {
-                next_pc = cpu.csr_read(0x141); // sepc
+                let spp = (cpu.csr.mstatus >> 8) & 1;
+                cpu.mode = if spp == 1 { PrivMode::S } else { PrivMode::U };
+                cpu.csr.s_ret(); // SIE←SPIE, SPIE←1, SPP←0
+                next_pc = cpu.csr.sepc;
             }
         },
         // --- Zicsr (CSR access) ---
