@@ -32,6 +32,30 @@ pub enum Instruction {
     Divuw  { rd: usize, rs1: usize, rs2: usize },
     Remw   { rd: usize, rs1: usize, rs2: usize },
     Remuw  { rd: usize, rs1: usize, rs2: usize },
+    // --- A extension (opcode 0x2F) ---
+    // Spec: Unprivileged §8. aq/rl bits decoded but ignored (single-hart).
+    LrD  { rd: usize, rs1: usize },
+    LrW  { rd: usize, rs1: usize },
+    ScD  { rd: usize, rs1: usize, rs2: usize },
+    ScW  { rd: usize, rs1: usize, rs2: usize },
+    AmoswapD { rd: usize, rs1: usize, rs2: usize },
+    AmoswapW { rd: usize, rs1: usize, rs2: usize },
+    AmoaddD  { rd: usize, rs1: usize, rs2: usize },
+    AmoaddW  { rd: usize, rs1: usize, rs2: usize },
+    AmoxorD  { rd: usize, rs1: usize, rs2: usize },
+    AmoxorW  { rd: usize, rs1: usize, rs2: usize },
+    AmoandD  { rd: usize, rs1: usize, rs2: usize },
+    AmoandW  { rd: usize, rs1: usize, rs2: usize },
+    AmoorD   { rd: usize, rs1: usize, rs2: usize },
+    AmoorW   { rd: usize, rs1: usize, rs2: usize },
+    AmominD  { rd: usize, rs1: usize, rs2: usize },
+    AmominW  { rd: usize, rs1: usize, rs2: usize },
+    AmomaxD  { rd: usize, rs1: usize, rs2: usize },
+    AmomaxW  { rd: usize, rs1: usize, rs2: usize },
+    AmominuD { rd: usize, rs1: usize, rs2: usize },
+    AmominuW { rd: usize, rs1: usize, rs2: usize },
+    AmomaxuD { rd: usize, rs1: usize, rs2: usize },
+    AmomaxuW { rd: usize, rs1: usize, rs2: usize },
     // --- RV64I W-variants R-type (opcode 0x3B) ---
     Addw { rd: usize, rs1: usize, rs2: usize },
     Subw { rd: usize, rs1: usize, rs2: usize },
@@ -255,6 +279,38 @@ pub fn decode(inst: u32) -> Result<Instruction> {
         0x67 => Ok(Instruction::Jalr { rd, rs1, imm: i_imm(inst) }),
         0x37 => Ok(Instruction::Lui   { rd, imm: u_imm(inst) }),
         0x17 => Ok(Instruction::Auipc { rd, imm: u_imm(inst) }),
+        // A extension: opcode 0x2F
+        // funct5 = inst[31:27]; funct3 bit0: 0=word(W), 1=double(D); aq/rl ignored.
+        // Spec: Unprivileged §8.2
+        0x2F => {
+            let funct5 = (inst >> 27) & 0x1f;
+            let is_double = (funct3 & 0x1) == 1; // funct3=2(W) or 3(D)
+            match (funct5, is_double) {
+                (0x02, true)  => Ok(Instruction::LrD  { rd, rs1 }),
+                (0x02, false) => Ok(Instruction::LrW  { rd, rs1 }),
+                (0x03, true)  => Ok(Instruction::ScD  { rd, rs1, rs2 }),
+                (0x03, false) => Ok(Instruction::ScW  { rd, rs1, rs2 }),
+                (0x01, true)  => Ok(Instruction::AmoswapD { rd, rs1, rs2 }),
+                (0x01, false) => Ok(Instruction::AmoswapW { rd, rs1, rs2 }),
+                (0x00, true)  => Ok(Instruction::AmoaddD  { rd, rs1, rs2 }),
+                (0x00, false) => Ok(Instruction::AmoaddW  { rd, rs1, rs2 }),
+                (0x04, true)  => Ok(Instruction::AmoxorD  { rd, rs1, rs2 }),
+                (0x04, false) => Ok(Instruction::AmoxorW  { rd, rs1, rs2 }),
+                (0x0C, true)  => Ok(Instruction::AmoandD  { rd, rs1, rs2 }),
+                (0x0C, false) => Ok(Instruction::AmoandW  { rd, rs1, rs2 }),
+                (0x08, true)  => Ok(Instruction::AmoorD   { rd, rs1, rs2 }),
+                (0x08, false) => Ok(Instruction::AmoorW   { rd, rs1, rs2 }),
+                (0x10, true)  => Ok(Instruction::AmominD  { rd, rs1, rs2 }),
+                (0x10, false) => Ok(Instruction::AmominW  { rd, rs1, rs2 }),
+                (0x14, true)  => Ok(Instruction::AmomaxD  { rd, rs1, rs2 }),
+                (0x14, false) => Ok(Instruction::AmomaxW  { rd, rs1, rs2 }),
+                (0x18, true)  => Ok(Instruction::AmominuD { rd, rs1, rs2 }),
+                (0x18, false) => Ok(Instruction::AmominuW { rd, rs1, rs2 }),
+                (0x1C, true)  => Ok(Instruction::AmomaxuD { rd, rs1, rs2 }),
+                (0x1C, false) => Ok(Instruction::AmomaxuW { rd, rs1, rs2 }),
+                _ => Err(anyhow!("illegal AMO funct5={funct5:#x} funct3={funct3:#x}")),
+            }
+        },
         0x0F => Ok(Instruction::Fence),
         // System / Zicsr: opcode 0x73. Spec: Unprivileged §9 (CSRs), Privileged §3.3 (mret).
         0x73 => {
@@ -360,5 +416,26 @@ mod tests {
     #[test] fn decode_div() {
         let inst = decode(0x0220C1B3).unwrap();
         assert_eq!(inst, Instruction::Div { rd: 3, rs1: 1, rs2: 2 });
+    }
+
+    // LR.D x3, (x1)  → opcode=0x2F, funct3=3, funct5=0x02, rs2=0, rd=3, rs1=1
+    // 0001 0000 0000 0000 1011 0001 1010 1111 = 0x1000_B1AF
+    #[test] fn decode_lrd() {
+        let inst = decode(0x1000B1AF).unwrap();
+        assert_eq!(inst, Instruction::LrD { rd: 3, rs1: 1 });
+    }
+
+    // SC.D x3, x2, x1 → funct5=0x03, funct3=3, rd=3, rs1=1, rs2=2
+    // 0001 1000 0010 0000 1011 0001 1010 1111 = 0x1820_B1AF
+    #[test] fn decode_scd() {
+        let inst = decode(0x1820B1AF).unwrap();
+        assert_eq!(inst, Instruction::ScD { rd: 3, rs1: 1, rs2: 2 });
+    }
+
+    // AMOADD.D x3, x2, (x1) → funct5=0x00, funct3=3, rd=3, rs1=1, rs2=2
+    // 0000 0000 0010 0000 1011 0001 1010 1111 = 0x0020_B1AF
+    #[test] fn decode_amoaddd() {
+        let inst = decode(0x0020B1AF).unwrap();
+        assert_eq!(inst, Instruction::AmoaddD { rd: 3, rs1: 1, rs2: 2 });
     }
 }
