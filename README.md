@@ -4,16 +4,16 @@ A RISC-V emulator in Rust, built to boot mainline Linux.
 
 **Target:** RV64IMA, M/S/U privilege levels, Sv39 MMU, OpenSBI + Linux + BusyBox initramfs.
 
-**Status:** Phase 1 in progress — RV64I user-mode interpreter.
+**Status:** Phase 2 complete — RV64IMA interpreter with M-mode privilege and trap delivery. 103 riscv-tests passing.
 
 ## Phases
 
 | # | Scope | Status |
 |---|-------|--------|
-| 1 | RV64I interpreter, riscv-tests passing | In progress |
-| 2 | M/A extensions, Zicsr, privilege modes, traps | Not started |
-| 3 | Sv39 MMU, TLB | Not started |
-| 4 | CLINT, PLIC, UART, virtio-blk | Not started |
+| 1 | RV64I interpreter, rv64ui-p-* passing (54 tests) | Done |
+| 2 | M/A extensions, Zicsr, M-mode privilege/traps, rv64um/ua/mi-p-* passing | Done |
+| 3 | S-mode privilege, Sv39 MMU, rv64si-p-* + rv64ui-v-* passing | In progress |
+| 4 | CLINT, PLIC, UART 16550, virtio-blk — OpenSBI banner | Not started |
 | 5 | Boot Linux to `#` prompt | Not started |
 
 ## Build

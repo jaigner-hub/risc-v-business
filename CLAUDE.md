@@ -6,7 +6,10 @@
 cargo build                        # debug build
 cargo build --release              # release build
 cargo test                         # run all tests (includes riscv-tests harness)
-cargo test rv64ui_p_               # run only Phase 1 ISA tests
+cargo test rv64ui_p_               # run only rv64ui-p-* tests
+cargo test rv64um_p_               # run only rv64um-p-* tests
+cargo test rv64ua_p_               # run only rv64ua-p-* tests
+cargo test rv64mi_p_               # run only rv64mi-p-* tests
 cargo test bus                     # run Bus unit tests
 cargo test cpu                     # run Cpu unit tests
 cargo test decode                  # run decode unit tests
@@ -27,7 +30,7 @@ src/cpu/decode.rs      Instruction enum + decode(u32) -> Result<Instruction>
 src/cpu/execute.rs     execute(&mut Cpu, Instruction) -> Result<()>
 build.rs               Generates one #[test] per vendored ELF in tests/riscv-tests/
 tests/riscv_tests.rs   Includes build.rs output
-tests/riscv-tests/     Vendored rv64ui-p-* ELF binaries (~40 files)
+tests/riscv-tests/     Vendored rv64ui/um/ua/mi-p-* ELF binaries (103 tests)
 scripts/               One-time helper scripts
 images/                OpenSBI, kernel Image, rootfs.img (gitignored)
 ```
@@ -36,13 +39,13 @@ images/                OpenSBI, kernel Image, rootfs.img (gitignored)
 
 Do NOT start phase N+1 until phase N's test suite is fully green.
 
-| Phase | Done criterion |
-|-------|---------------|
-| 1 (current) | All `rv64ui-p-*` pass |
-| 2 | `rv64um-p-*`, `rv64ua-p-*`, `rv64mi-p-*` pass |
-| 3 | `rv64si-p-*`, `rv64ui-v-*` pass |
-| 4 | OpenSBI banner prints |
-| 5 | `#` shell prompt, `uname -a` and `ls /` work |
+| Phase | Done criterion | Status |
+|-------|---------------|--------|
+| 1 | All `rv64ui-p-*` pass | Done |
+| 2 | `rv64um-p-*`, `rv64ua-p-*`, `rv64mi-p-*` pass | Done |
+| 3 (current) | `rv64si-p-*`, `rv64ui-v-*` pass | In progress |
+| 4 | OpenSBI banner prints | Not started |
+| 5 | `#` shell prompt, `uname -a` and `ls /` work | Not started |
 
 ## Memory map (mirrors QEMU virt)
 
@@ -54,7 +57,7 @@ Do NOT start phase N+1 until phase N's test suite is fully green.
 | UART 16550 | `0x1000_0000` |
 | virtio-blk MMIO | `0x1000_1000` |
 
-## Adding instructions (Phase 2+)
+## Adding instructions (Phase 3+)
 
 1. Add variant to `Instruction` enum in `src/cpu/decode.rs`
 2. Add decode arm in `decode()` — cite the spec section
