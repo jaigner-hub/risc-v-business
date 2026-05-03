@@ -37,12 +37,14 @@ impl Cpu {
     /// Read register. x0 always returns 0.
     #[inline(always)]
     pub fn reg(&self, n: usize) -> u64 {
+        assert!(n < 32, "register index out of range: {n}");
         if n == 0 { 0 } else { self.regs[n] }
     }
 
     /// Write register. Writes to x0 are silently ignored.
     #[inline(always)]
     pub fn set_reg(&mut self, n: usize, val: u64) {
+        assert!(n < 32, "register index out of range: {n}");
         if n != 0 { self.regs[n] = val; }
     }
 
