@@ -36,6 +36,7 @@ pub struct Cpu {
     pub tracer: Tracer,
     pub csr: Csr,
     pub reservation: Option<u64>,
+    pub mode: PrivMode,
 }
 
 impl Cpu {
@@ -47,6 +48,7 @@ impl Cpu {
             tracer: Tracer::new(trace),
             csr: Csr::new(),
             reservation: None,
+            mode: PrivMode::M,
         }
     }
 
@@ -75,11 +77,23 @@ impl Cpu {
     }
 
     pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
-        self.csr.trap_entry();
-        self.csr.mepc   = self.pc;
-        self.csr.mcause = cause;
-        self.csr.mtval  = tval;
-        self.pc = self.csr.mtvec & !0b11;
+        // Delegate to S-mode if medeleg has this exception bit set and we're not in M-mode.
+        // Priv §3.1.8
+        if cause < 64 && (self.csr.medeleg >> cause) & 1 == 1 && self.mode != PrivMode::M {
+            self.csr.s_trap_entry(self.mode == PrivMode::S);
+            self.csr.sepc   = self.pc;
+            self.csr.scause = cause;
+            self.csr.stval  = tval;
+            self.pc  = self.csr.stvec & !0b11;
+            self.mode = PrivMode::S;
+        } else {
+            self.csr.trap_entry();
+            self.csr.mepc   = self.pc;
+            self.csr.mcause = cause;
+            self.csr.mtval  = tval;
+            self.pc  = self.csr.mtvec & !0b11;
+            self.mode = PrivMode::M;
+        }
     }
 
     /// Fetch, decode, execute one instruction. Advances pc.
@@ -180,5 +194,45 @@ mod tests {
         assert_eq!(c.pc, 0x8000_0010);
         assert_eq!(c.csr.mcause, 1); // instruction access fault
         assert_eq!(c.csr.mtval, 0x0000_0000);
+    }
+
+    #[test]
+    fn deliver_trap_routes_to_m_when_no_delegation() {
+        let mut c = cpu();
+        c.csr.mtvec = 0x8000_0100;
+        c.csr.medeleg = 0; // nothing delegated
+        c.deliver_trap(8, 0);
+        assert_eq!(c.csr.mcause, 8);
+        assert_eq!(c.pc, 0x8000_0100);
+        assert_eq!(c.mode, PrivMode::M);
+    }
+
+    #[test]
+    fn deliver_trap_routes_to_s_when_delegated() {
+        let mut c = cpu();
+        c.csr.stvec  = 0x8000_0200;
+        c.csr.mtvec  = 0x8000_0100;
+        c.csr.medeleg = 1 << 8; // delegate cause 8 (ecall from U-mode)
+        c.mode = PrivMode::U;
+        c.deliver_trap(8, 0xABCD);
+        assert_eq!(c.csr.scause, 8);
+        assert_eq!(c.csr.stval,  0xABCD);
+        assert_eq!(c.pc,   0x8000_0200);
+        assert_eq!(c.mode, PrivMode::S);
+        // M-mode registers untouched
+        assert_eq!(c.csr.mcause, 0);
+    }
+
+    #[test]
+    fn deliver_trap_m_mode_not_delegated_even_if_medeleg_set() {
+        // Traps from M-mode are never delegated (Priv §3.1.8)
+        let mut c = cpu();
+        c.csr.mtvec   = 0x8000_0100;
+        c.csr.medeleg = 1 << 11; // bit 11 = ecall from M-mode
+        c.mode = PrivMode::M;
+        c.deliver_trap(11, 0);
+        assert_eq!(c.csr.mcause, 11);
+        assert_eq!(c.pc, 0x8000_0100);
+        assert_eq!(c.mode, PrivMode::M);
     }
 }
