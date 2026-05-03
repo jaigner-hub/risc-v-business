@@ -370,6 +370,164 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             let v = if b == 0 { sext(a as u64, 31) } else { sext((a % b) as u64, 31) };
             cpu.set_reg(rd, v);
         },
+        // --- A extension: atomics ---
+        // Spec: Unprivileged §8. Single-hart: aq/rl ordering is trivially satisfied.
+        Instruction::LrD { rd, rs1 } => {
+            let addr = cpu.reg(rs1);
+            let v = cpu.bus.load(addr, 8)?;
+            cpu.reservation = Some(addr);
+            cpu.set_reg(rd, v);
+        },
+        Instruction::LrW { rd, rs1 } => {
+            let addr = cpu.reg(rs1);
+            let v = sext(cpu.bus.load(addr, 4)?, 31);
+            cpu.reservation = Some(addr);
+            cpu.set_reg(rd, v);
+        },
+        Instruction::ScD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            if cpu.reservation == Some(addr) {
+                cpu.bus.store(addr, 8, cpu.reg(rs2))?;
+                cpu.set_reg(rd, 0);
+            } else {
+                cpu.set_reg(rd, 1);
+            }
+            cpu.reservation = None;
+        },
+        Instruction::ScW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            if cpu.reservation == Some(addr) {
+                cpu.bus.store(addr, 4, cpu.reg(rs2))?;
+                cpu.set_reg(rd, 0);
+            } else {
+                cpu.set_reg(rd, 1);
+            }
+            cpu.reservation = None;
+        },
+        Instruction::AmoswapD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            cpu.bus.store(addr, 8, cpu.reg(rs2))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoswapW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            cpu.bus.store(addr, 4, cpu.reg(rs2))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoaddD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            cpu.bus.store(addr, 8, old.wrapping_add(cpu.reg(rs2)))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoaddW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let new = sext(old.wrapping_add(cpu.reg(rs2)), 31);
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoxorD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            cpu.bus.store(addr, 8, old ^ cpu.reg(rs2))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoxorW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let new = sext(old ^ cpu.reg(rs2), 31);
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoandD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            cpu.bus.store(addr, 8, old & cpu.reg(rs2))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoandW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let new = sext(old & cpu.reg(rs2), 31);
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoorD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            cpu.bus.store(addr, 8, old | cpu.reg(rs2))?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmoorW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let new = sext(old | cpu.reg(rs2), 31);
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmominD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            let new = if (old as i64) < (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
+            cpu.bus.store(addr, 8, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmominW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let rs2v = cpu.reg(rs2);
+            let new = if (old as i32) < (rs2v as i32) { old } else { sext(rs2v, 31) };
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmomaxD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            let new = if (old as i64) > (cpu.reg(rs2) as i64) { old } else { cpu.reg(rs2) };
+            cpu.bus.store(addr, 8, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmomaxW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let rs2v = cpu.reg(rs2);
+            let new = if (old as i32) > (rs2v as i32) { old } else { sext(rs2v, 31) };
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmominuD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            let new = old.min(cpu.reg(rs2));
+            cpu.bus.store(addr, 8, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmominuW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let rs2v = cpu.reg(rs2) as u32;
+            let new = if (old as u32) < rs2v { old } else { sext(rs2v as u64, 31) };
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmomaxuD { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = cpu.bus.load(addr, 8)?;
+            let new = old.max(cpu.reg(rs2));
+            cpu.bus.store(addr, 8, new)?;
+            cpu.set_reg(rd, old);
+        },
+        Instruction::AmomaxuW { rd, rs1, rs2 } => {
+            let addr = cpu.reg(rs1);
+            let old = sext(cpu.bus.load(addr, 4)?, 31);
+            let rs2v = cpu.reg(rs2) as u32;
+            let new = if (old as u32) > rs2v { old } else { sext(rs2v as u64, 31) };
+            cpu.bus.store(addr, 4, new)?;
+            cpu.set_reg(rd, old);
+        },
     }
 
     cpu.pc = next_pc;
@@ -495,5 +653,52 @@ mod tests {
         execute(&mut c, Instruction::Mulw { rd: 3, rs1: 1, rs2: 2 }).unwrap();
         // lower 32: 0x8000_0001 * 2 = 0x1_0000_0002; truncated to 32 bits = 0x0000_0002; sign-extend = 2
         assert_eq!(c.reg(3), 2u64);
+    }
+
+    #[test] fn lr_sc_success() {
+        let mut c = cpu_with_ram(1024);
+        // Store a value in RAM at offset 0 (address 0x8000_0000)
+        c.bus.store(0x8000_0000, 8, 0xABCD_1234u64).unwrap();
+        c.set_reg(1, 0x8000_0000); // rs1 = address
+        // LR.D: load from (rs1), set reservation
+        execute(&mut c, Instruction::LrD { rd: 2, rs1: 1 }).unwrap();
+        assert_eq!(c.reg(2), 0xABCD_1234);
+        assert_eq!(c.reservation, Some(0x8000_0000));
+        // SC.D: reservation matches → store succeeds, rd=0
+        c.set_reg(3, 0xDEAD_BEEF);
+        execute(&mut c, Instruction::ScD { rd: 4, rs1: 1, rs2: 3 }).unwrap();
+        assert_eq!(c.reg(4), 0); // success
+        assert_eq!(c.reservation, None);
+        assert_eq!(c.bus.load(0x8000_0000, 8).unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test] fn sc_failure_clears_reservation() {
+        let mut c = cpu_with_ram(1024);
+        c.reservation = None; // no reservation
+        c.set_reg(1, 0x8000_0000);
+        c.set_reg(2, 42);
+        execute(&mut c, Instruction::ScD { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), 1); // failure
+        assert_eq!(c.reservation, None);
+    }
+
+    #[test] fn amoadd_d() {
+        let mut c = cpu_with_ram(1024);
+        c.bus.store(0x8000_0000, 8, 10u64).unwrap();
+        c.set_reg(1, 0x8000_0000);
+        c.set_reg(2, 5u64);
+        execute(&mut c, Instruction::AmoaddD { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), 10); // old value
+        assert_eq!(c.bus.load(0x8000_0000, 8).unwrap(), 15); // new value
+    }
+
+    #[test] fn amomin_d_signed() {
+        let mut c = cpu_with_ram(1024);
+        c.bus.store(0x8000_0000, 8, (-3i64) as u64).unwrap();
+        c.set_reg(1, 0x8000_0000);
+        c.set_reg(2, (-5i64) as u64);
+        execute(&mut c, Instruction::AmominD { rd: 3, rs1: 1, rs2: 2 }).unwrap();
+        assert_eq!(c.reg(3), (-3i64) as u64); // old
+        assert_eq!(c.bus.load(0x8000_0000, 8).unwrap(), (-5i64) as u64); // min(-3,-5) = -5
     }
 }
