@@ -489,4 +489,25 @@ mod tests {
         assert_eq!(c.mode, PrivMode::S);             // stays in S-mode (delegated)
         assert_eq!(c.csr.mcause, 0);                 // M-mode untouched
     }
+
+    #[test]
+    fn satp_write_sets_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // CSRW satp, x1 = CSRRW x0, satp(0x180), x1
+        execute(&mut c, Instruction::Csrrw { rd: 0, rs1: 1, csr: 0x180 }).unwrap();
+        assert!(c.jit_invalidate, "writing satp must set jit_invalidate");
+    }
+
+    #[test]
+    fn sfence_sets_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        execute(&mut c, Instruction::SfenceVma).unwrap();
+        assert!(c.jit_invalidate, "SFENCE.VMA must set jit_invalidate");
+    }
 }

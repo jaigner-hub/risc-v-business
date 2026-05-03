@@ -400,6 +400,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 next_pc = cpu.pc;
             } else {
                 cpu.mmu.flush();
+                cpu.jit_invalidate = true;
             }
         },
         // --- Zicsr (CSR access) ---
@@ -416,6 +417,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
                 cpu.csr_write(csr, new_val);
                 cpu.set_reg(rd, old);
+                if csr == 0x180 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         Instruction::Csrrs { rd, rs1, csr } => {
@@ -426,6 +431,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let mask = cpu.reg(rs1);
                 if rs1 != 0 { cpu.csr_write(csr, old | mask); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && rs1 != 0 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         Instruction::Csrrc { rd, rs1, csr } => {
@@ -436,6 +445,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let mask = cpu.reg(rs1);
                 if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && rs1 != 0 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         Instruction::Csrrwi { rd, uimm, csr } => {
