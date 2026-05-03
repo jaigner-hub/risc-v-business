@@ -383,4 +383,15 @@ mod tests {
         assert_eq!(c.pc, 0x8000_0006);  // advanced by 4
         assert_eq!(c.csr.mcause, 0);
     }
+
+    #[test]
+    fn wfi_advances_pc_and_does_not_trap() {
+        let mut c = Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false);
+        c.csr.mtvec = 0x8000_0100;
+        // WFI encoding: 0x10500073
+        c.bus.store(0x8000_0000, 4, 0x10500073u64).unwrap();
+        c.step().unwrap();
+        assert_eq!(c.pc, 0x8000_0004); // advanced past WFI
+        assert_eq!(c.csr.mcause, 0);   // no trap
+    }
 }
