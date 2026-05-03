@@ -39,8 +39,13 @@ echo "Copying rv64mi-p-* to $DEST..."
 find "$WORK/riscv-tests/isa" -name 'rv64mi-p-*' ! -name '*.dump' ! -name '*.o' \
     -exec cp {} "$DEST/" \;
 
+echo "Copying rv64si-p-* to $DEST..."
+find "$WORK/riscv-tests/isa" -name 'rv64si-p-*' ! -name '*.dump' ! -name '*.o' \
+    -exec cp {} "$DEST/" \;
+
 echo "Done."
 echo "  rv64ui: $(ls "$DEST" | grep -c 'rv64ui-p-') ELFs"
 echo "  rv64um: $(ls "$DEST" | grep -c 'rv64um-p-') ELFs"
 echo "  rv64ua: $(ls "$DEST" | grep -c 'rv64ua-p-') ELFs"
 echo "  rv64mi: $(ls "$DEST" | grep -c 'rv64mi-p-') ELFs"
+echo "  rv64si: $(ls "$DEST" | grep -c 'rv64si-p-') ELFs"

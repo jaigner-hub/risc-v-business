@@ -37,7 +37,8 @@ fn main() {
             let is_test_elf = name.starts_with("rv64ui-p-")
                 || name.starts_with("rv64um-p-")
                 || name.starts_with("rv64ua-p-")
-                || name.starts_with("rv64mi-p-");
+                || name.starts_with("rv64mi-p-")
+                || name.starts_with("rv64si-p-");
             if !is_test_elf || name.ends_with(".dump") || name.ends_with(".o") || name == ".gitkeep" {
                 continue;
             }
