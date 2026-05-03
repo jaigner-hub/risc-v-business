@@ -769,7 +769,7 @@ impl JitCache {
                     RvcEffect::Seq => {
                         guest_pc = guest_pc.wrapping_add(2);
                         inst_count += 1;
-                        if inst_count >= 64 {
+                        if inst_count >= 128 {
                             emit_return(&mut ops, guest_pc);
                             break;
                         }
@@ -1491,6 +1491,11 @@ impl JitCache {
                     break;
                 }
 
+                // FENCE / FENCE.I: no-op in our single-threaded emulator.
+                // Inlined rather than slow-pathed so that ftrace's 39K
+                // flush_icache_range() calls don't each break the JIT block.
+                Instruction::Fence => {}
+
                 // Everything else: slow path (end block)
                 _ => {
                     block_exit!();
@@ -1500,7 +1505,7 @@ impl JitCache {
 
             guest_pc = next_seq;
             inst_count += 1;
-            if inst_count >= 64 {
+            if inst_count >= 128 {
                 emit_return(&mut ops, guest_pc);
                 break;
             }
@@ -1835,6 +1840,24 @@ mod tests {
         let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
         assert_eq!(cpu.regs[1], 42, "C.ADDI x1,x1,1 must produce 42");
         assert_eq!(next_pc, ram + 2, "block must end at ECALL address");
+    }
+
+    // C.LI x1, -1 — negative immediate must sign-extend to 0xFFFFFFFFFFFFFFFF
+    // Encoding: funct3=010|bit12=1|rd=1|imm[4:0]=11111|01 = 0x50FD
+    #[test]
+    fn rvc_cli_negative() {
+        let ram = 0x8000_0000u64;
+        let mut cpu = make_cpu();
+        cpu.regs[1] = 0;
+        cpu.bus.store(ram,   2, 0x50FDu64).unwrap(); // C.LI x1, -1
+        cpu.bus.store(ram+2, 4, 0x00000073u64).unwrap();
+
+        let mut jit = JitCache::new();
+        jit.compile(&mut cpu, ram);
+
+        let f = jit.get(ram).expect("C.LI block must be compiled");
+        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        assert_eq!(cpu.regs[1], u64::MAX, "C.LI x1,-1 must produce 0xFFFF...FFFF (sign-extended)");
     }
 
     // C.MV x1, x2  (Q2 funct3=100, bit12=0, rd=1, rs2=2)

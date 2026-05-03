@@ -134,7 +134,7 @@ fn main() -> Result<()> {
     loop {
         // Scale tick by estimated instructions per JIT block so CLINT fires every
         // ~1024 guest instructions regardless of privilege mode:
-        //   M-mode JIT blocks: up to 64 instructions → tick += 64 → fires every 16 blocks
+        //   M-mode JIT blocks: up to 128 instructions → tick += 64 → fires every ~16 blocks
         //   S/U-mode JIT blocks: ~8 instructions avg  → tick += 8  → fires every 128 blocks
         //   Interpreter step: 1 instruction            → tick += 1  → fires every 1024 steps
         let tick_inc = match jit.get(cpu.pc) {
