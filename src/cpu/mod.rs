@@ -136,14 +136,30 @@ impl Cpu {
         }
 
         // Instruction fetch — translate VA → PA through MMU, then bus load. Priv §4.3.
-        let raw = match self.mmu.translate(
+        // Fetch low 16 bits first to detect RVC (16-bit) vs 32-bit without crossing page boundaries.
+        let pa = match self.mmu.translate(
             &mut self.bus, self.csr.satp, self.mode, self.csr.mstatus, pc, AccessType::Fetch
         ) {
             Err(f) => { self.deliver_trap(f.cause, f.tval); return Ok(()); }
-            Ok(pa) => match self.bus.load(pa, 4) {
+            Ok(pa) => pa,
+        };
+
+        // Fetch low 16 bits first; determines 16-bit vs 32-bit instruction.
+        let lo = match self.bus.load(pa, 2) {
+            Err(_) => { self.deliver_trap(1, pc); return Ok(()); }
+            Ok(v)  => v as u16,
+        };
+
+        let raw = if lo & 0x3 != 0x3 {
+            // 16-bit RVC instruction: do not fetch upper 2 bytes.
+            lo as u32
+        } else {
+            // 32-bit instruction: fetch upper 16 bits.
+            let hi = match self.bus.load(pa + 2, 2) {
                 Err(_) => { self.deliver_trap(1, pc); return Ok(()); }
-                Ok(v)  => v as u32,
-            }
+                Ok(v)  => v as u16,
+            };
+            (lo as u32) | ((hi as u32) << 16)
         };
 
         // Detect RVC (16-bit) vs full (32-bit) instruction.
@@ -338,5 +354,33 @@ mod tests {
         assert_eq!(c.pc, 0x9000_0014); // 0x9000_0000 + 5*4 = 0x9000_0014
         assert_eq!(c.mode, PrivMode::S);
         assert_eq!(c.csr.scause, (1u64 << 63) | 5);
+    }
+
+    #[test]
+    fn step_rvc_c_nop_advances_pc_by_2() {
+        // C.NOP (0x0001) must advance PC by 2, not 4.
+        let mut c = Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0000, false);
+        c.csr.mtvec = 0x8000_0100;
+        c.bus.store(0x8000_0000, 2, 0x0001u64).unwrap(); // C.NOP = 0x0001
+        c.step().unwrap();
+        assert_eq!(c.pc, 0x8000_0002); // RVC: advance by 2
+        assert_eq!(c.csr.mcause, 0);   // no trap
+    }
+
+    #[test]
+    fn step_32bit_at_odd_2byte_boundary_fetches_correctly() {
+        // A 32-bit instruction at a 2-byte-aligned (but not 4-byte-aligned) address.
+        // Tests that the 2+2 fetch reads both halves correctly.
+        // ADDI x1, x0, 42  = 0x02A00093
+        // At address 0x8000_0002 (2-byte aligned, not 4-byte aligned):
+        let mut c = Cpu::new(Bus::new(64, 0x8000_0000), 0x8000_0002, false);
+        c.csr.mtvec = 0x8000_0100;
+        // Write lower 16 bits at 0x8000_0002, upper 16 bits at 0x8000_0004
+        c.bus.store(0x8000_0002, 2, 0x0093u64).unwrap(); // low half of ADDI
+        c.bus.store(0x8000_0004, 2, 0x02A0u64).unwrap(); // high half of ADDI
+        c.step().unwrap();
+        assert_eq!(c.reg(1), 42);       // ADDI x1, x0, 42 executed correctly
+        assert_eq!(c.pc, 0x8000_0006);  // advanced by 4
+        assert_eq!(c.csr.mcause, 0);
     }
 }
