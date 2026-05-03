@@ -109,8 +109,8 @@ fn main() -> Result<()> {
                 }
             }
             None => {
-                cpu.step()?;
                 let pc = cpu.pc;
+                cpu.step()?;
                 jit.compile(&mut cpu, pc);
             }
         }
