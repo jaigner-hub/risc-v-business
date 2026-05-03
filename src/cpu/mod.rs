@@ -37,6 +37,7 @@ pub struct Cpu {
     pub csr: Csr,
     pub reservation: Option<u64>,
     pub mode: PrivMode,
+    pub mmu: mmu::Mmu,
 }
 
 impl Cpu {
@@ -49,6 +50,7 @@ impl Cpu {
             csr: Csr::new(),
             reservation: None,
             mode: PrivMode::M,
+            mmu: mmu::Mmu::new(),
         }
     }
 
