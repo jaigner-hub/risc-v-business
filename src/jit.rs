@@ -143,10 +143,15 @@ static JIT_STORE_CALLOUTS: [JitStoreFn; 4] =
 //   Return: rax = next guest PC, or u64::MAX on slow path
 
 fn emit_prologue(ops: &mut Assembler) {
+    // After the caller's CALL, RSP ≡ 8 mod 16 (return address pushed).
+    // Two callee-save pushes bring RSP to 16N-24 ≡ 8 mod 16.
+    // `sub rsp, 8` pads to 16N-32 ≡ 0 mod 16 so every nested CALL in the block
+    // obeys the SysV ABI 16-byte alignment requirement.
     dynasm!(ops
         ; .arch x64
         ; push r15
         ; push r14
+        ; sub rsp, 8
         ; mov r15, rdi
         ; mov r14, rsi
     );
@@ -156,6 +161,7 @@ fn emit_return(ops: &mut Assembler, next_pc: u64) {
     let pc_val = next_pc as i64;
     dynasm!(ops
         ; .arch x64
+        ; add rsp, 8
         ; pop r14
         ; pop r15
         ; mov rax, QWORD pc_val
@@ -166,6 +172,7 @@ fn emit_return(ops: &mut Assembler, next_pc: u64) {
 fn emit_slow_path(ops: &mut Assembler) {
     dynasm!(ops
         ; .arch x64
+        ; add rsp, 8
         ; pop r14
         ; pop r15
         ; mov rax, QWORD -1i64
@@ -709,8 +716,9 @@ mod tests {
         jit.compile(&mut cpu, ram);
 
         let f = jit.get(ram).unwrap();
-        unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+        let next_pc = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
 
         assert_eq!(cpu.regs[1], 0x0000_1000);
+        assert_eq!(next_pc, u64::MAX, "ECALL after LUI should trigger slow path");
     }
 }
