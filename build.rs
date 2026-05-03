@@ -34,7 +34,7 @@ fn main() {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if !name.starts_with("rv64ui-p-") || name.ends_with(".dump") || name == ".gitkeep" {
+            if !name.starts_with("rv64ui-p-") || name.ends_with(".dump") || name.ends_with(".o") || name == ".gitkeep" {
                 continue;
             }
             found = true;
