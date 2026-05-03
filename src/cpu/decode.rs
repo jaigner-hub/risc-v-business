@@ -69,6 +69,216 @@ pub enum Instruction {
     Ebreak,  // opcode 0x73, imm=1
 }
 
-pub fn decode(_inst: u32) -> Result<Instruction> {
-    Err(anyhow!("decode not yet implemented"))
+/// Sign-extend the high 12 bits of inst (I-type immediate).
+/// Spec: Unprivileged §2.3
+fn i_imm(inst: u32) -> i64 { ((inst as i32) >> 20) as i64 }
+
+/// S-type immediate: inst[31:25] | inst[11:7], sign-extended.
+fn s_imm(inst: u32) -> i64 {
+    let raw = ((inst >> 25) << 5) | ((inst >> 7) & 0x1f);
+    (((raw << 20) as i32) >> 20) as i64
+}
+
+/// B-type immediate: inst[31]|inst[7]|inst[30:25]|inst[11:8], shifted left 1.
+fn b_imm(inst: u32) -> i64 {
+    let raw = ((inst >> 31) << 12)
+            | (((inst >> 7) & 0x1) << 11)
+            | (((inst >> 25) & 0x3f) << 5)
+            | (((inst >> 8) & 0xf) << 1);
+    (((raw << 19) as i32) >> 19) as i64
+}
+
+/// U-type immediate: inst[31:12] << 12, sign-extended from bit 31.
+fn u_imm(inst: u32) -> i64 { ((inst & 0xFFFF_F000) as i32) as i64 }
+
+/// J-type immediate: inst[31]|inst[19:12]|inst[20]|inst[30:21], shifted left 1.
+fn j_imm(inst: u32) -> i64 {
+    let raw = ((inst >> 31) << 20)
+            | ((inst & 0x000F_F000))
+            | (((inst >> 20) & 0x1) << 11)
+            | (((inst >> 21) & 0x3ff) << 1);
+    (((raw << 11) as i32) >> 11) as i64
+}
+
+/// Extract register index from bit position lo.
+fn reg(inst: u32, lo: u32) -> usize { ((inst >> lo) & 0x1f) as usize }
+
+pub fn decode(inst: u32) -> Result<Instruction> {
+    let opcode = inst & 0x7f;
+    let funct3 = (inst >> 12) & 0x7;
+    let funct7 = (inst >> 25) & 0x7f;
+    let rd  = reg(inst, 7);
+    let rs1 = reg(inst, 15);
+    let rs2 = reg(inst, 20);
+
+    match opcode {
+        // R-type: opcode 0x33
+        0x33 => match (funct3, funct7) {
+            (0x0, 0x00) => Ok(Instruction::Add  { rd, rs1, rs2 }),
+            (0x0, 0x20) => Ok(Instruction::Sub  { rd, rs1, rs2 }),
+            (0x1, 0x00) => Ok(Instruction::Sll  { rd, rs1, rs2 }),
+            (0x2, 0x00) => Ok(Instruction::Slt  { rd, rs1, rs2 }),
+            (0x3, 0x00) => Ok(Instruction::Sltu { rd, rs1, rs2 }),
+            (0x4, 0x00) => Ok(Instruction::Xor  { rd, rs1, rs2 }),
+            (0x5, 0x00) => Ok(Instruction::Srl  { rd, rs1, rs2 }),
+            (0x5, 0x20) => Ok(Instruction::Sra  { rd, rs1, rs2 }),
+            (0x6, 0x00) => Ok(Instruction::Or   { rd, rs1, rs2 }),
+            (0x7, 0x00) => Ok(Instruction::And  { rd, rs1, rs2 }),
+            _ => Err(anyhow!("illegal R-type funct3={funct3:#x} funct7={funct7:#x}")),
+        },
+        // RV64I W-variants R-type: opcode 0x3B
+        0x3B => match (funct3, funct7) {
+            (0x0, 0x00) => Ok(Instruction::Addw { rd, rs1, rs2 }),
+            (0x0, 0x20) => Ok(Instruction::Subw { rd, rs1, rs2 }),
+            (0x1, 0x00) => Ok(Instruction::Sllw { rd, rs1, rs2 }),
+            (0x5, 0x00) => Ok(Instruction::Srlw { rd, rs1, rs2 }),
+            (0x5, 0x20) => Ok(Instruction::Sraw { rd, rs1, rs2 }),
+            _ => Err(anyhow!("illegal W R-type funct3={funct3:#x} funct7={funct7:#x}")),
+        },
+        // I-type arithmetic: opcode 0x13
+        0x13 => match funct3 {
+            0x0 => Ok(Instruction::Addi  { rd, rs1, imm: i_imm(inst) }),
+            0x2 => Ok(Instruction::Slti  { rd, rs1, imm: i_imm(inst) }),
+            0x3 => Ok(Instruction::Sltiu { rd, rs1, imm: i_imm(inst) }),
+            0x4 => Ok(Instruction::Xori  { rd, rs1, imm: i_imm(inst) }),
+            0x6 => Ok(Instruction::Ori   { rd, rs1, imm: i_imm(inst) }),
+            0x7 => Ok(Instruction::Andi  { rd, rs1, imm: i_imm(inst) }),
+            // Shifts: shamt is imm[5:0] for RV64I (6-bit)
+            0x1 => Ok(Instruction::Slli  { rd, rs1, shamt: (inst >> 20) & 0x3f }),
+            0x5 => {
+                let shamt = (inst >> 20) & 0x3f;
+                if (inst >> 30) & 1 == 0 {
+                    Ok(Instruction::Srli { rd, rs1, shamt })
+                } else {
+                    Ok(Instruction::Srai { rd, rs1, shamt })
+                }
+            },
+            _ => unreachable!(),
+        },
+        // RV64I IW-variants: opcode 0x1B
+        0x1B => match funct3 {
+            0x0 => Ok(Instruction::Addiw { rd, rs1, imm: i_imm(inst) }),
+            // shamt is imm[4:0] for 32-bit ops (5-bit)
+            0x1 => Ok(Instruction::Slliw { rd, rs1, shamt: (inst >> 20) & 0x1f }),
+            0x5 => {
+                let shamt = (inst >> 20) & 0x1f;
+                if (inst >> 30) & 1 == 0 {
+                    Ok(Instruction::Srliw { rd, rs1, shamt })
+                } else {
+                    Ok(Instruction::Sraiw { rd, rs1, shamt })
+                }
+            },
+            _ => Err(anyhow!("illegal IW funct3={funct3:#x}")),
+        },
+        // Loads: opcode 0x03
+        0x03 => {
+            let imm = i_imm(inst);
+            match funct3 {
+                0x0 => Ok(Instruction::Lb  { rd, rs1, imm }),
+                0x1 => Ok(Instruction::Lh  { rd, rs1, imm }),
+                0x2 => Ok(Instruction::Lw  { rd, rs1, imm }),
+                0x3 => Ok(Instruction::Ld  { rd, rs1, imm }),
+                0x4 => Ok(Instruction::Lbu { rd, rs1, imm }),
+                0x5 => Ok(Instruction::Lhu { rd, rs1, imm }),
+                0x6 => Ok(Instruction::Lwu { rd, rs1, imm }),
+                _ => Err(anyhow!("illegal load funct3={funct3:#x}")),
+            }
+        },
+        // Stores: opcode 0x23
+        0x23 => {
+            let imm = s_imm(inst);
+            match funct3 {
+                0x0 => Ok(Instruction::Sb { rs1, rs2, imm }),
+                0x1 => Ok(Instruction::Sh { rs1, rs2, imm }),
+                0x2 => Ok(Instruction::Sw { rs1, rs2, imm }),
+                0x3 => Ok(Instruction::Sd { rs1, rs2, imm }),
+                _ => Err(anyhow!("illegal store funct3={funct3:#x}")),
+            }
+        },
+        // Branches: opcode 0x63
+        0x63 => {
+            let imm = b_imm(inst);
+            match funct3 {
+                0x0 => Ok(Instruction::Beq  { rs1, rs2, imm }),
+                0x1 => Ok(Instruction::Bne  { rs1, rs2, imm }),
+                0x4 => Ok(Instruction::Blt  { rs1, rs2, imm }),
+                0x5 => Ok(Instruction::Bge  { rs1, rs2, imm }),
+                0x6 => Ok(Instruction::Bltu { rs1, rs2, imm }),
+                0x7 => Ok(Instruction::Bgeu { rs1, rs2, imm }),
+                _ => Err(anyhow!("illegal branch funct3={funct3:#x}")),
+            }
+        },
+        0x6F => Ok(Instruction::Jal  { rd, imm: j_imm(inst) }),
+        0x67 => Ok(Instruction::Jalr { rd, rs1, imm: i_imm(inst) }),
+        0x37 => Ok(Instruction::Lui   { rd, imm: u_imm(inst) }),
+        0x17 => Ok(Instruction::Auipc { rd, imm: u_imm(inst) }),
+        0x0F => Ok(Instruction::Fence),
+        0x73 => match i_imm(inst) {
+            0 => Ok(Instruction::Ecall),
+            1 => Ok(Instruction::Ebreak),
+            _ => Err(anyhow!("illegal system instruction imm={:#x}", i_imm(inst))),
+        },
+        _ => Err(anyhow!("illegal opcode {opcode:#x} at inst={inst:#010x}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ADDI x1, x0, 42   →  0x02a00093
+    #[test] fn decode_addi() {
+        let inst = decode(0x02a00093).unwrap();
+        assert_eq!(inst, Instruction::Addi { rd: 1, rs1: 0, imm: 42 });
+    }
+
+    // ADD x2, x1, x2   →  0x00208133
+    // 0x00208133 = opcode=0110011 rd=00010(2) funct3=000 rs1=00001(1) rs2=00010(2) funct7=0000000
+    #[test] fn decode_add() {
+        let inst = decode(0x00208133).unwrap();
+        assert_eq!(inst, Instruction::Add { rd: 2, rs1: 1, rs2: 2 });
+    }
+
+    // LW x5, 8(x2)   →  0x00812283
+    #[test] fn decode_lw() {
+        let inst = decode(0x00812283).unwrap();
+        assert_eq!(inst, Instruction::Lw { rd: 5, rs1: 2, imm: 8 });
+    }
+
+    // SW x5, -4(x2)   →  0xfe512e23
+    #[test] fn decode_sw() {
+        let inst = decode(0xfe512e23).unwrap();
+        assert_eq!(inst, Instruction::Sw { rs1: 2, rs2: 5, imm: -4 });
+    }
+
+    // BEQ x1, x2, +8   →  0x00208463
+    #[test] fn decode_beq() {
+        let inst = decode(0x00208463).unwrap();
+        assert_eq!(inst, Instruction::Beq { rs1: 1, rs2: 2, imm: 8 });
+    }
+
+    // JAL x1, +4   →  0x004000ef
+    #[test] fn decode_jal() {
+        let inst = decode(0x004000ef).unwrap();
+        assert_eq!(inst, Instruction::Jal { rd: 1, imm: 4 });
+    }
+
+    // LUI x1, imm=0x12345000
+    // inst = 0x123450b7: opcode=0110111 rd=00001(1) imm[31:12]=0x12345
+    #[test] fn decode_lui() {
+        let inst = decode(0x123450b7).unwrap();
+        assert_eq!(inst, Instruction::Lui { rd: 1, imm: 0x12345000 });
+    }
+
+    // SRAI x1, x1, 3   →  0x4030d093
+    #[test] fn decode_srai() {
+        let inst = decode(0x4030d093).unwrap();
+        assert_eq!(inst, Instruction::Srai { rd: 1, rs1: 1, shamt: 3 });
+    }
+
+    // ADDIW x1, x1, -1   →  0xfff0809b
+    #[test] fn decode_addiw() {
+        let inst = decode(0xfff0809b).unwrap();
+        assert_eq!(inst, Instruction::Addiw { rd: 1, rs1: 1, imm: -1 });
+    }
 }
