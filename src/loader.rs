@@ -9,7 +9,7 @@ pub struct LoadedElf {
 }
 
 const RAM_BASE: u64 = 0x8000_0000;
-const RAM_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
+const RAM_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 
 /// Load an ELF64 binary: copy PT_LOAD segments into RAM, return entry point
 /// and (if present) the address of the `tohost` symbol used by riscv-tests.
@@ -57,4 +57,14 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf> {
         .map(|s| s.st_value);
 
     Ok(LoadedElf { bus, entry: elf.entry + load_offset, tohost_addr })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_size_constant_is_256_mib() {
+        assert_eq!(RAM_SIZE, 256 * 1024 * 1024);
+    }
 }
