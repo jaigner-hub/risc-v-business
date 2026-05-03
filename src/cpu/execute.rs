@@ -458,6 +458,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
                 cpu.csr_write(csr, uimm as u64);
                 cpu.set_reg(rd, old);
+                if csr == 0x180 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         Instruction::Csrrsi { rd, uimm, csr } => {
@@ -467,6 +471,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let old = cpu.csr_read(csr);
                 if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && uimm != 0 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         Instruction::Csrrci { rd, uimm, csr } => {
@@ -476,6 +484,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 let old = cpu.csr_read(csr);
                 if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && uimm != 0 {
+                    cpu.mmu.flush();
+                    cpu.jit_invalidate = true;
+                }
             }
         },
         // --- M extension: integer multiply/divide ---

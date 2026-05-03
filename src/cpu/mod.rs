@@ -510,4 +510,26 @@ mod tests {
         execute(&mut c, Instruction::SfenceVma).unwrap();
         assert!(c.jit_invalidate, "SFENCE.VMA must set jit_invalidate");
     }
+
+    #[test]
+    fn csrrwi_satp_sets_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // csrwi satp, 0 — should still flush even with uimm=0
+        execute(&mut c, Instruction::Csrrwi { rd: 0, uimm: 0, csr: 0x180 }).unwrap();
+        assert!(c.jit_invalidate, "csrwi satp must set jit_invalidate even with uimm=0");
+    }
+
+    #[test]
+    fn csrrs_satp_rs1_zero_does_not_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // CSRRS x0, satp, x0 — read-only, must NOT set jit_invalidate
+        execute(&mut c, Instruction::Csrrs { rd: 0, rs1: 0, csr: 0x180 }).unwrap();
+        assert!(!c.jit_invalidate, "Csrrs with rs1=0 must not set jit_invalidate");
+    }
 }
