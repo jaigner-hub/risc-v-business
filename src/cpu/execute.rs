@@ -258,10 +258,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             cpu.csr.mret(); // MIE←MPIE, MPIE←1, MPP←U
             next_pc = cpu.csr.mepc;
         },
-        // SRET: restore privilege to SPP, jump to sepc. Illegal when mstatus.TSR=1. Priv §4.1.1
+        // SRET: restore privilege to SPP, jump to sepc. Illegal when in S-mode with mstatus.TSR=1. Priv §3.1.6.5
         Instruction::Sret => {
-            if (cpu.csr.mstatus >> 22) & 1 != 0 {
-                cpu.deliver_trap(2, 0x10200073); // TSR=1: illegal instruction
+            if cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 22) & 1 != 0 {
+                cpu.deliver_trap(2, 0x10200073); // TSR=1 in S-mode: illegal instruction
                 next_pc = cpu.pc;
             } else {
                 let spp = (cpu.csr.mstatus >> 8) & 1;
