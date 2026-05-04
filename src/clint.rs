@@ -3,13 +3,21 @@ pub struct Clint {
     pub mtimecmp: u64,
 }
 
+// mtime ticks advanced per call to tick().
+// tick() is called every 1024 guest-tick batch (~128 JIT blocks, ~35K times/sec at
+// JIT speed). The DTB advertises timebase-frequency=10_000_000 (10 MHz); Linux sets
+// mtimecmp += 10_000_000/HZ ≈ 40_000 per scheduler tick (HZ=250).
+// With INC=1: mtime advances 35K/s → 40K mtime per tick takes ~1.1s real time.
+// With INC=128: mtime advances 4.48M/s → 40K mtime per tick takes ~9ms real time.
+const MTIME_INC: u64 = 128;
+
 impl Clint {
     pub fn new() -> Self {
         Self { mtime: 0, mtimecmp: u64::MAX }
     }
 
     pub fn tick(&mut self) -> bool {
-        self.mtime = self.mtime.wrapping_add(1);
+        self.mtime = self.mtime.wrapping_add(MTIME_INC);
         self.mtime >= self.mtimecmp
     }
 
@@ -35,8 +43,8 @@ mod tests {
     #[test]
     fn tick_returns_false_when_mtime_below_mtimecmp() {
         let mut c = Clint::new(); // mtime=0, mtimecmp=u64::MAX
-        assert!(!c.tick()); // mtime=1, 1 < MAX → false
-        assert!(!c.tick()); // mtime=2 → false
+        assert!(!c.tick()); // mtime=128, still < MAX → false
+        assert!(!c.tick()); // mtime=256 → false
     }
 
     #[test]
@@ -44,7 +52,7 @@ mod tests {
         let mut c = Clint::new();
         c.mtime    = 9;
         c.mtimecmp = 10;
-        assert!(c.tick()); // mtime becomes 10, 10 >= 10 → true
+        assert!(c.tick()); // mtime=137, 137 >= 10 → true
     }
 
     #[test]
@@ -52,6 +60,6 @@ mod tests {
         let mut c = Clint::new();
         c.mtime    = 10;
         c.mtimecmp = 10;
-        assert!(c.tick()); // mtime=11, 11 >= 10 → true
+        assert!(c.tick()); // mtime=138, 138 >= 10 → true
     }
 }
