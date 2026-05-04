@@ -448,7 +448,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         Instruction::Auipc { rd, imm } => { cpu.set_reg(rd, pc.wrapping_add(imm as u64)); },
 
         // --- System ---
-        Instruction::Fence => { /* NOP in Phase 1 — no memory-ordering concerns */ },
+        Instruction::Fence  => { /* NOP in Phase 1 — no memory-ordering concerns */ },
+        // FENCE.I: instruction cache fence. Signal the run loop to flush the JIT so
+        // any code patched since last compile (jump_labels, ftrace) is recompiled fresh.
+        // Uses fence_i_pending (not jit_invalidate) so the run loop can rate-limit this
+        // — ftrace issues 39K consecutive FENCE.I calls which would thrash the JIT cache.
+        Instruction::FenceI => { cpu.fence_i_pending = true; },
         Instruction::Wfi   => { /* NOP — no interrupts in Phase 1 */ },
 
         // ECALL: cause depends on current privilege mode. Priv §3.3.1 Table 3.6

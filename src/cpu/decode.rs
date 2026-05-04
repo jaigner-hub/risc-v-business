@@ -115,7 +115,8 @@ pub enum Instruction {
     Lui   { rd: usize, imm: i64 },  // opcode 0x37
     Auipc { rd: usize, imm: i64 },  // opcode 0x17
     // --- System ---
-    Fence,   // opcode 0x0F — NOP in Phase 1
+    Fence,   // opcode 0x0F, funct3=0 — memory ordering NOP
+    FenceI,  // opcode 0x0F, funct3=1 — instruction cache fence (flush JIT)
     Ecall,   // opcode 0x73, imm=0
     Ebreak,  // opcode 0x73, imm=1
     Mret,    // opcode 0x73, imm=0x302 — return from M-mode trap
@@ -419,7 +420,7 @@ pub fn decode(inst: u32) -> Result<Instruction> {
                 _ => Err(anyhow::Error::new(IllegalInstruction(inst))),
             }
         },
-        0x0F => Ok(Instruction::Fence),
+        0x0F => if funct3 == 1 { Ok(Instruction::FenceI) } else { Ok(Instruction::Fence) },
         // System / Zicsr: opcode 0x73. Spec: Unprivileged §9 (CSRs), Privileged §3.3 (mret).
         0x73 => {
             let csr = ((inst >> 20) & 0xfff) as u16;

@@ -17,6 +17,14 @@ struct Args {
     #[arg(long)]
     dtb: bool,
 
+    /// Disable JIT compilation (interpreter-only; slower but useful for debugging)
+    #[arg(long)]
+    no_jit: bool,
+
+    /// Enable emulator diagnostic messages on stderr (PC, mode, tick, JIT size, IRQ state)
+    #[arg(long)]
+    debug: bool,
+
     /// Raw kernel Image to load at 0x8020_0000 (requires --dtb)
     #[arg(long)]
     kernel: Option<String>,
@@ -74,53 +82,21 @@ fn main() -> Result<()> {
         cpu.set_reg(11, DTB_BASE); // a1 = FDT pointer
     }
 
-    // Stdin reader thread feeds bytes into the UART RX buffer.
-    // Filters ANSI CPR sequences (\033[<digits>;<digits>R) which the host terminal
-    // sends in response to our \033[6n cursor-position query; the emulator already
-    // injects a synthetic \033[1;1R, so the real host response must be discarded.
-    // Other ESC sequences (arrow keys, function keys) are buffered until we know
-    // whether they're CPR, then replayed if they're not.
+    // Stdin reader: forward raw bytes to the UART RX channel.
+    // The UART already suppresses \033[6n in its TX path (intercepted before it
+    // reaches the host terminal), so the host never sends a CPR response — no
+    // need to filter \033[...R sequences here.
     let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
     std::thread::spawn(move || {
         use std::io::Read;
         let stdin = std::io::stdin();
         let mut buf = [0u8; 64];
-        let mut esc_buf: Vec<u8> = Vec::new();
         loop {
             match stdin.lock().read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     for &b in &buf[..n] {
-                        if esc_buf.is_empty() {
-                            if b == 0x1B {
-                                esc_buf.push(b);
-                            } else if stdin_tx.send(b).is_err() {
-                                return;
-                            }
-                        } else {
-                            match esc_buf.len() {
-                                1 => {
-                                    if b == b'[' {
-                                        esc_buf.push(b);
-                                    } else {
-                                        for &c in &esc_buf { let _ = stdin_tx.send(c); }
-                                        esc_buf.clear();
-                                        if stdin_tx.send(b).is_err() { return; }
-                                    }
-                                },
-                                _ => {
-                                    if b.is_ascii_digit() || b == b';' {
-                                        esc_buf.push(b);
-                                    } else if b == b'R' && esc_buf.len() >= 3 {
-                                        esc_buf.clear();
-                                    } else {
-                                        for &c in &esc_buf { let _ = stdin_tx.send(c); }
-                                        esc_buf.clear();
-                                        if stdin_tx.send(b).is_err() { return; }
-                                    }
-                                },
-                            }
-                        }
+                        if stdin_tx.send(b).is_err() { return; }
                     }
                 }
             }
@@ -132,6 +108,9 @@ fn main() -> Result<()> {
     let mut tick: u64 = 0;
     let mut last_diag = std::time::Instant::now();
     let mut last_pc: u64 = 0;
+    // Tick of last FENCE.I-triggered JIT flush. Rate-limited to avoid thrashing
+    // during ftrace's 39K consecutive FENCE.I patch burst.
+    let mut last_fence_i_flush: u64 = 0;
 
     loop {
         // Scale tick by estimated instructions per JIT block so CLINT fires every
@@ -139,31 +118,50 @@ fn main() -> Result<()> {
         //   M-mode JIT blocks: up to 128 instructions → tick += 64 → fires every ~16 blocks
         //   S/U-mode JIT blocks: ~8 instructions avg  → tick += 8  → fires every 128 blocks
         //   Interpreter step: 1 instruction            → tick += 1  → fires every 1024 steps
-        let tick_inc = match jit.get(cpu.pc) {
-            Some(f) => {
-                let mode = cpu.mode;
-                let next = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
-                if next == u64::MAX {
+        let tick_inc = if args.no_jit {
+            cpu.step()?;
+            1
+        } else {
+            match jit.get(cpu.pc) {
+                Some(f) => {
+                    let mode = cpu.mode;
+                    let next = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+                    if next == u64::MAX {
+                        cpu.step()?;
+                        1
+                    } else {
+                        cpu.pc = next;
+                        if mode == PrivMode::M { 64 } else { 8 }
+                    }
+                }
+                None => {
+                    let pc = cpu.pc;
                     cpu.step()?;
+                    if !cpu.jit_invalidate && !cpu.fence_i_pending {
+                        jit.compile(&mut cpu, pc);
+                    }
                     1
-                } else {
-                    cpu.pc = next;
-                    if mode == PrivMode::M { 64 } else { 8 }
                 }
-            }
-            None => {
-                let pc = cpu.pc;
-                cpu.step()?;
-                if !cpu.jit_invalidate {
-                    jit.compile(&mut cpu, pc);
-                }
-                1
             }
         };
 
+        // Immediate flush for satp PPN changes (address-translation change).
         if cpu.jit_invalidate {
             cpu.jit_invalidate = false;
             jit.invalidate();
+        }
+
+        // Rate-limited flush for FENCE.I (instruction-cache fence after code patching).
+        // ftrace issues ~39K FENCE.I calls in a burst; flushing on each would thrash
+        // the JIT cache. Limit to one flush per 65536 ticks (~19ms at JIT speed) so
+        // the burst only causes ~handful of flushes while still catching jump_label
+        // patches that happen sparsely throughout boot.
+        if cpu.fence_i_pending {
+            cpu.fence_i_pending = false;
+            if tick.wrapping_sub(last_fence_i_flush) >= 65536 {
+                jit.invalidate();
+                last_fence_i_flush = tick;
+            }
         }
 
         tick = tick.wrapping_add(tick_inc);
@@ -204,24 +202,25 @@ fn main() -> Result<()> {
             // call the CPU would spin in the idle loop forever after mip is raised.
             cpu.check_interrupts();
 
-            // Diagnostic every 2 seconds: PC, mode, tick, JIT size, interrupt state.
-            let now = std::time::Instant::now();
-            if now.duration_since(last_diag).as_millis() >= 2000 {
-                last_diag = now;
-                let mode_str = match cpu.mode {
-                    PrivMode::M => "M",
-                    PrivMode::S => "S",
-                    PrivMode::U => "U",
-                };
-                let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
-                let mip = cpu.csr.mip;
-                let mie = cpu.csr.mie;
-                let sie = (cpu.csr.mstatus >> 1) & 1;
-                eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit={:>5}  {}  \
-                           mip={:#06x} mie={:#06x} SIE={}",
-                          cpu.pc, mode_str, tick, jit.len(), moving,
-                          mip, mie, sie);
-                last_pc = cpu.pc;
+            if args.debug {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_diag).as_millis() >= 2000 {
+                    last_diag = now;
+                    let mode_str = match cpu.mode {
+                        PrivMode::M => "M",
+                        PrivMode::S => "S",
+                        PrivMode::U => "U",
+                    };
+                    let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
+                    let mip = cpu.csr.mip;
+                    let mie = cpu.csr.mie;
+                    let sie = (cpu.csr.mstatus >> 1) & 1;
+                    eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit={:>5}  {}  \
+                               mip={:#06x} mie={:#06x} SIE={}",
+                              cpu.pc, mode_str, tick, jit.len(), moving,
+                              mip, mie, sie);
+                    last_pc = cpu.pc;
+                }
             }
         }
     }

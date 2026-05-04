@@ -53,6 +53,10 @@ pub struct Cpu {
     /// address translation (satp write, sfence.vma) so the run loop can
     /// flush JitCache before continuing.
     pub jit_invalidate: bool,
+    /// Set by FENCE.I execution. The run loop rate-limits actual JIT flushes
+    /// from this source (to avoid thrashing during ftrace's 39K patch burst)
+    /// while still flushing for occasional jump_label patches.
+    pub fence_i_pending: bool,
 }
 
 // Compute trap PC per Priv §5.1.10: vectored mode dispatches interrupts to base + cause_code*4.
@@ -82,6 +86,7 @@ impl Cpu {
             inst_size: 4,
             fcsr: 0,
             jit_invalidate: false,
+            fence_i_pending: false,
         }
     }
 
