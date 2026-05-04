@@ -179,10 +179,16 @@ fn main() -> Result<()> {
             } else {
                 cpu.csr.mip &= !(1u64 << 7);
             }
-            if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
-                cpu.csr.mip |= 1 << 5;
-            } else {
-                cpu.csr.mip &= !(1u64 << 5);
+            // Sstc extension: only manage STIP from stimecmp when the kernel has
+            // explicitly written stimecmp (≠ default u64::MAX). Without Sstc the
+            // kernel uses SBI SET_TIMER → OpenSBI injects STIP via mip write; the
+            // unconditional 'else' branch was clearing that injection every batch.
+            if cpu.csr.stimecmp != u64::MAX {
+                if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
+                    cpu.csr.mip |= 1 << 5;
+                } else {
+                    cpu.csr.mip &= !(1u64 << 5);
+                }
             }
             let uart_irq = cpu.bus.uart.irq_pending();
             cpu.bus.plic.set_pending(10, uart_irq);
