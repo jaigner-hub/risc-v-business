@@ -106,9 +106,13 @@ impl Csr {
 
     pub fn mret(&mut self) {
         let mpie = (self.mstatus >> 7) & 1;
-        self.mstatus = (self.mstatus & !0x1888u64) // clear MIE[3], MPIE[7], MPP[12:11]
-            | (mpie << 3)                          // MIE ← MPIE
-            | (1u64 << 7);                         // MPIE ← 1
+        let mpp  = (self.mstatus >> 11) & 3;
+        // Clear MIE[3], MPIE[7], MPP[12:11]. Also clear MPRV[17] when returning to
+        // less-privileged mode (MPP != M). Priv §3.3.2.
+        let clear_mask = if mpp != 3 { 0x0002_1888u64 } else { 0x1888u64 };
+        self.mstatus = (self.mstatus & !clear_mask)
+            | (mpie << 3)   // MIE ← MPIE
+            | (1u64 << 7);  // MPIE ← 1, MPP ← 0 (U)
     }
 
     /// Called on trap delivery to S-mode. Saves SIE into SPIE; sets SPP to prior mode.
@@ -145,7 +149,15 @@ impl Csr {
             0x141 => self.sepc     = val & !0x1,  // IALIGN=16 (RVC): only bit 0 forced to 0
             0x142 => self.scause   = val,
             0x143 => self.stval    = val,
-            0x180 => self.satp     = val,
+            0x180 => {
+                let mode = val >> 60;
+                // Only bare (0) and Sv39 (8) are supported. Sv48 (9) and Sv57 (10)
+                // are silently ignored per RISC-V Priv §4.1.12: "Writes to satp with
+                // unsupported MODE values are ignored, and no trap is raised."
+                if mode == 0 || mode == 8 {
+                    self.satp = val;
+                }
+            }
             0x3A0 => self.pmpcfg0  = val,
             0x3A2 => self.pmpcfg2  = val,
             0x3B0..=0x3BF => self.pmpaddr[(addr - 0x3B0) as usize] = val,

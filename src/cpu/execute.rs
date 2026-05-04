@@ -68,8 +68,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     match inst {
         // --- R-type arithmetic ---
         Instruction::Add  { rd, rs1, rs2 } => {
-            let v = cpu.reg(rs1).wrapping_add(cpu.reg(rs2));
-            cpu.set_reg(rd, v);
+            cpu.set_reg(rd, cpu.reg(rs1).wrapping_add(cpu.reg(rs2)));
         },
         Instruction::Sub  { rd, rs1, rs2 } => {
             let v = cpu.reg(rs1).wrapping_sub(cpu.reg(rs2));
@@ -259,6 +258,22 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Sw { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            // SW-TRUNC watchpoint: fire when SW discards a non-zero upper 32 bits in the
+            // user-space virtual address range (0x0000_003f...). This catches the pattern
+            // where a 64-bit user-space pointer is stored with a 4-byte store (SW) instead
+            // of SD, truncating it. Fires in any privilege mode.
+            if std::env::var_os("RISCV_EMU_FAULT_DUMP").is_some() {
+                let v = cpu.reg(rs2);
+                let hi32 = v >> 32;
+                if hi32 > 0 && hi32 <= 0x3f {
+                    let mode_char = match cpu.mode { PrivMode::M => 'M', PrivMode::S => 'S', PrivMode::U => 'U' };
+                    eprintln!("[SW-TRUNC] mode={} pc={:#018x} va={:#018x} x{}={:#018x}",
+                              mode_char, cpu.pc, va, rs2, v);
+                    let r = &cpu.regs;
+                    eprintln!("  ra={:#018x} sp={:#018x}", r[1], r[2]);
+                    eprintln!("  a0={:#018x} a1={:#018x} a2={:#018x} a3={:#018x}", r[10], r[11], r[12], r[13]);
+                }
+            }
             match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.store(pa, 4, cpu.reg(rs2)) {
@@ -269,9 +284,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         },
         Instruction::Sd { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
+            let val = cpu.reg(rs2);
             match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 8, cpu.reg(rs2)) {
+                Ok(pa) => match cpu.bus.store(pa, 8, val) {
                     Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
                     Ok(_)  => {}
                 }
@@ -288,7 +304,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 4) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000 | (v & 0xFFFF_FFFF), // NaN-boxed
+                    Ok(v)  => {
+                        cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000 | (v & 0xFFFF_FFFF); // NaN-boxed
+                        cpu.csr.mstatus |= 0x6000; // FS = Dirty
+                    }
                 }
             }
         },
@@ -298,7 +317,10 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
                 Ok(pa) => match cpu.bus.load(pa, 8) {
                     Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.fregs[fd] = v,
+                    Ok(v)  => {
+                        cpu.fregs[fd] = v;
+                        cpu.csr.mstatus |= 0x6000; // FS = Dirty
+                    }
                 }
             }
         },
@@ -431,6 +453,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 0x79 => cpu.fregs[rd] = cpu.regs[rs1],                                          // FMV.D.X
                 _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
             }
+            cpu.csr.mstatus |= 0x6000; // FS = Dirty (Priv §3.1.6.6)
         }
 
         // --- Fused multiply-add (R4-type) ---
@@ -453,6 +476,7 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 (1, 0x4F) => cpu.fregs[rd] = db((-fd(cpu.fregs[rs1])).mul_add(fd(cpu.fregs[rs2]), -fd(cpu.fregs[rs3]))),
                 _ => { cpu.deliver_trap(2, 0); next_pc = cpu.pc; }
             }
+            cpu.csr.mstatus |= 0x6000; // FS = Dirty (Priv §3.1.6.6)
         }
 
         // --- Branches ---
@@ -526,7 +550,9 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // LUI: rd = SignExt(imm[31:12] << 12). imm already has lower 12 bits = 0.
         Instruction::Lui   { rd, imm } => { cpu.set_reg(rd, imm as u64); },
         // AUIPC: rd = pc + SignExt(imm[31:12] << 12).
-        Instruction::Auipc { rd, imm } => { cpu.set_reg(rd, pc.wrapping_add(imm as u64)); },
+        Instruction::Auipc { rd, imm } => {
+            cpu.set_reg(rd, pc.wrapping_add(imm as u64));
+        },
 
         // --- System ---
         Instruction::Fence => { /* NOP in Phase 1 — no memory-ordering concerns */ },

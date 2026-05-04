@@ -114,7 +114,9 @@ impl Cpu {
     #[inline(always)]
     pub fn set_reg(&mut self, n: usize, val: u64) {
         assert!(n < 32, "register index out of range: {n}");
-        if n != 0 { self.regs[n] = val; }
+        if n != 0 {
+            self.regs[n] = val;
+        }
     }
 
     pub fn deliver_trap(&mut self, cause: u64, tval: u64) {
@@ -124,6 +126,26 @@ impl Cpu {
         let delegated    = cause_code < 64  // only codes [0,64) are delegatable per Priv §3.1.8
                            && (deleg_reg >> cause_code) & 1 == 1
                            && self.mode != PrivMode::M;
+
+        // Dump all registers on any U-mode page fault (load/store/instruction PF).
+        // This catches the crash site regardless of which instruction or library triggers it.
+        // Controlled by RISCV_EMU_FAULT_DUMP.
+        if !is_interrupt && self.mode == PrivMode::U
+            && matches!(cause_code, 12 | 13 | 15)
+            && std::env::var_os("RISCV_EMU_FAULT_DUMP").is_some()
+        {
+            let r = &self.regs;
+            let cause_name = match cause_code { 12 => "insn-PF", 13 => "load-PF", _ => "store-PF" };
+            eprintln!("[U-PF] {cause_name} pc={:#018x} tval={:#018x}", self.pc, tval);
+            eprintln!("  ra={:#018x} sp={:#018x} gp={:#018x}", r[1], r[2], r[3]);
+            eprintln!("  s0={:#018x} s1={:#018x}", r[8], r[9]);
+            eprintln!("  a0={:#018x} a1={:#018x} a2={:#018x} a3={:#018x}", r[10], r[11], r[12], r[13]);
+            eprintln!("  a4={:#018x} a5={:#018x} a6={:#018x} a7={:#018x}", r[14], r[15], r[16], r[17]);
+            eprintln!("  s2={:#018x} s3={:#018x} s4={:#018x} s5={:#018x}", r[18], r[19], r[20], r[21]);
+            eprintln!("  s6={:#018x} s7={:#018x} s8={:#018x} s9={:#018x}", r[22], r[23], r[24], r[25]);
+            eprintln!("  s10={:#018x} s11={:#018x}", r[26], r[27]);
+            eprintln!("  t0={:#018x} t1={:#018x} t2={:#018x}", r[5], r[6], r[7]);
+        }
 
         if delegated {
             self.csr.s_trap_entry(self.mode == PrivMode::S);
@@ -212,8 +234,20 @@ impl Cpu {
             lo as u32
         } else {
             // 32-bit instruction: fetch upper 16 bits.
-            let hi = match self.bus.load(pa + 2, 2) {
-                Err(_) => { self.deliver_trap(1, pc); return Ok(()); }
+            // If the low half sits at the last 2 bytes of a page (VA & 0xfff == 0xffe),
+            // the upper half is on the next page and needs its own MMU translation.
+            let pa_hi = if pc & 0xfff == 0xffe {
+                match self.mmu.translate(
+                    &mut self.bus, self.csr.satp, self.mode, self.csr.mstatus, pc + 2, AccessType::Fetch,
+                ) {
+                    Err(f) => { self.deliver_trap(f.cause, f.tval); return Ok(()); }
+                    Ok(pa) => pa,
+                }
+            } else {
+                pa + 2
+            };
+            let hi = match self.bus.load(pa_hi, 2) {
+                Err(_) => { self.deliver_trap(1, pc + 2); return Ok(()); }
                 Ok(v)  => v as u16,
             };
             (lo as u32) | ((hi as u32) << 16)

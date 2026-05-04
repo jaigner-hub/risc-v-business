@@ -7,6 +7,7 @@ pub const INITRD_BASE: u64 = 0x8600_0000;
 ///
 /// - `initrd_size > 0`: include `linux,initrd-start/end` in `chosen` and boot via initramfs.
 /// - `has_disk`: add a `virtio_mmio@10001000` node (IRQ 1) and set `root=/dev/vda rw` in bootargs.
+/// Both boot modes include `ima=off nokaslr` to skip slow integrity measurements and KASLR setup.
 pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
     let mut fdt = FdtWriter::new()?;
 
@@ -23,12 +24,12 @@ pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
     if has_disk {
         fdt.property_string(
             "bootargs",
-            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb root=/dev/vda rw rootwait",
+            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb root=/dev/vda rw rootwait rootflags=noatime,data=writeback ima=off nokaslr",
         )?;
     } else {
         fdt.property_string(
             "bootargs",
-            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb rdinit=/init",
+            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb rdinit=/init ima=off nokaslr",
         )?;
     }
     // initrd is used both in initramfs-only mode (our busybox init) and alongside
@@ -98,16 +99,9 @@ pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
     fdt.property_u32("riscv,ndev", 31)?;
     fdt.end_node(plic)?;
 
-    // serial@10000000
-    let serial = fdt.begin_node("serial@10000000")?;
-    fdt.property_string("compatible", "ns16550a")?;
-    fdt.property_array_u32("reg", &[0x0000_0000, 0x1000_0000, 0x0000_0000, 0x0000_0100])?;
-    fdt.property_u32("clock-frequency", 3_686_400)?;
-    fdt.property_u32("interrupts", 10)?;
-    fdt.property_u32("interrupt-parent", 2)?;
-    fdt.end_node(serial)?;
-
-    // virtio-mmio@10001000 — block device on IRQ 1
+    // virtio-mmio@10001000 — block device on IRQ 1.
+    // Listed before serial so the kernel sends its uevent early; udev then loads
+    // virtio_mmio before processing any other device that might trigger a crash.
     if has_disk {
         let virtio = fdt.begin_node("virtio_mmio@10001000")?;
         fdt.property_string("compatible", "virtio,mmio")?;
@@ -116,6 +110,15 @@ pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
         fdt.property_u32("interrupt-parent", 2)?;
         fdt.end_node(virtio)?;
     }
+
+    // serial@10000000
+    let serial = fdt.begin_node("serial@10000000")?;
+    fdt.property_string("compatible", "ns16550a")?;
+    fdt.property_array_u32("reg", &[0x0000_0000, 0x1000_0000, 0x0000_0000, 0x0000_0100])?;
+    fdt.property_u32("clock-frequency", 3_686_400)?;
+    fdt.property_u32("interrupts", 10)?;
+    fdt.property_u32("interrupt-parent", 2)?;
+    fdt.end_node(serial)?;
 
     fdt.end_node(soc)?;
     fdt.end_node(root)?;

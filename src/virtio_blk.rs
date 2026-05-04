@@ -43,6 +43,7 @@ const S_IOERR: u8 = 1;
 pub struct VirtioBlk {
     disk: Option<File>,
     capacity: u64,          // total sectors (512 bytes each)
+    pub debug: bool,
 
     // MMIO register shadows
     device_features_sel: u32,
@@ -68,6 +69,7 @@ impl VirtioBlk {
         Self {
             disk,
             capacity,
+            debug: false,
             device_features_sel: 0,
             driver_features: [0; 2],
             driver_features_sel: 0,
@@ -83,7 +85,7 @@ impl VirtioBlk {
     }
 
     pub fn load(&self, off: u64, _width: usize) -> u64 {
-        match off {
+        let v = match off {
             0x000 => VIRTIO_MAGIC as u64,
             0x004 => VIRTIO_VERSION as u64,
             0x008 => VIRTIO_DEVICE_BLK as u64,
@@ -99,11 +101,34 @@ impl VirtioBlk {
             0x100 => self.capacity as u32 as u64,
             0x104 => (self.capacity >> 32) as u64,
             _ => 0,
+        };
+        if self.debug {
+            let name = match off {
+                0x000 => "MagicValue",  0x004 => "Version",     0x008 => "DeviceID",
+                0x00C => "VendorID",    0x010 => "DeviceFeatures", 0x034 => "QueueNumMax",
+                0x038 => "QueueNum",    0x044 => "QueueReady",  0x060 => "IRQStatus",
+                0x070 => "Status",      0x0FC => "ConfigGen",   0x100 => "Capacity_lo",
+                0x104 => "Capacity_hi", _ => "?",
+            };
+            eprintln!("[virtio] load  @{off:#05x} ({name}) = {v:#010x}");
         }
+        v
     }
 
     // Returns true when QueueNotify is written — caller must call process_queue().
     pub fn store(&mut self, off: u64, _width: usize, val: u64) -> bool {
+        if self.debug {
+            let name = match off {
+                0x014 => "DevFeatSel", 0x020 => "DrvFeatures", 0x024 => "DrvFeatSel",
+                0x030 => "QueueSel",   0x038 => "QueueNum",     0x044 => "QueueReady",
+                0x050 => "QueueNotify",0x064 => "IRQAck",       0x070 => "Status",
+                0x080 => "DescLo",     0x084 => "DescHi",
+                0x090 => "AvailLo",    0x094 => "AvailHi",
+                0x0a0 => "UsedLo",     0x0a4 => "UsedHi",
+                _ => "?",
+            };
+            eprintln!("[virtio] store @{off:#05x} ({name}) = {val:#010x}");
+        }
         match off {
             0x014 => self.device_features_sel = val as u32,
             0x020 => {
@@ -120,21 +145,22 @@ impl VirtioBlk {
                 self.device_status = val as u32;
                 if val == 0 { self.reset(); }
             }
-            // QueueDescLow/High
-            0x074 => self.desc_addr  = (self.desc_addr  & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
-            0x078 => self.desc_addr  = (self.desc_addr  & 0x0000_0000_FFFF_FFFF) | (val << 32),
-            // QueueDriverLow/High (available ring)
-            0x080 => self.avail_addr = (self.avail_addr & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
-            0x084 => self.avail_addr = (self.avail_addr & 0x0000_0000_FFFF_FFFF) | (val << 32),
-            // QueueDeviceLow/High (used ring)
-            0x090 => self.used_addr  = (self.used_addr  & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
-            0x094 => self.used_addr  = (self.used_addr  & 0x0000_0000_FFFF_FFFF) | (val << 32),
+            // QueueDescLow/High — virtio_mmio.h 0x080/0x084
+            0x080 => self.desc_addr  = (self.desc_addr  & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
+            0x084 => self.desc_addr  = (self.desc_addr  & 0x0000_0000_FFFF_FFFF) | (val << 32),
+            // QueueAvailLow/High (driver ring) — virtio_mmio.h 0x090/0x094
+            0x090 => self.avail_addr = (self.avail_addr & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
+            0x094 => self.avail_addr = (self.avail_addr & 0x0000_0000_FFFF_FFFF) | (val << 32),
+            // QueueUsedLow/High (device ring) — virtio_mmio.h 0x0a0/0x0a4
+            0x0a0 => self.used_addr  = (self.used_addr  & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF),
+            0x0a4 => self.used_addr  = (self.used_addr  & 0x0000_0000_FFFF_FFFF) | (val << 32),
             _ => {}
         }
         false
     }
 
     fn reset(&mut self) {
+        eprintln!("[virtio] device reset (device_status written 0)");
         self.queue_ready = 0;
         self.desc_addr   = 0;
         self.avail_addr  = 0;
@@ -148,9 +174,17 @@ impl VirtioBlk {
     // into the used ring and sets irq_status so the PLIC can raise an interrupt.
     pub fn process_queue(&mut self, ram: &mut [u8], ram_base: u64) {
         if self.queue_ready == 0 || self.avail_addr == 0 || self.desc_addr == 0 {
+            eprintln!("[virtio] WARN: QueueNotify while not ready \
+                       (ready={} avail={:#x} desc={:#x} used={:#x})",
+                      self.queue_ready, self.avail_addr, self.desc_addr, self.used_addr);
             return;
         }
+        if self.debug {
+            eprintln!("[virtio] process_queue: desc={:#x} avail={:#x} used={:#x}",
+                self.desc_addr, self.avail_addr, self.used_addr);
+        }
 
+        let mut processed = 0u32;
         loop {
             // driver ring: u16 flags @ +0, u16 idx @ +2, u16 ring[N] @ +4
             let avail_idx = r16(ram, ram_base, self.avail_addr + 2);
@@ -170,6 +204,13 @@ impl VirtioBlk {
 
             self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
             self.irq_status = 1;
+            processed += 1;
+        }
+        if processed == 0 {
+            eprintln!("[virtio] WARN: QueueNotify but avail ring empty \
+                       (avail_idx={} last={})",
+                      r16(ram, ram_base, self.avail_addr + 2),
+                      self.last_avail_idx);
         }
     }
 
@@ -204,21 +245,43 @@ impl VirtioBlk {
         }
 
         let byte_off = sector * SECTOR_SIZE;
+        if self.debug {
+            let type_str = match req_type { T_IN => "READ", T_OUT => "WRITE", T_FLUSH => "FLUSH", _ => "?" };
+            eprintln!("[virtio] req type={type_str} sector={sector} byte_off={byte_off:#x} descs={}", descs.len());
+            for (i, &(addr, len, flags)) in descs.iter().enumerate() {
+                eprintln!("[virtio]   desc[{i}] addr={addr:#x} len={len} flags={flags:#x}");
+            }
+        }
         let ok = match req_type {
             T_IN => {
                 // Read from disk into device-writable data descriptors.
                 let disk = self.disk.as_mut().unwrap();
                 if disk.seek(SeekFrom::Start(byte_off)).is_err() {
+                    if self.debug { eprintln!("[virtio] seek FAIL sector={sector}"); }
                     w8(ram, ram_base, status_addr, S_IOERR);
                     return;
                 }
                 let mut success = true;
                 for &(addr, len, flags) in data_descs {
                     if flags & DESC_F_WRITE == 0 { continue; }
-                    let off = (addr - ram_base) as usize;
-                    if disk.read_exact(&mut ram[off..off + len as usize]).is_err() {
+                    if addr < ram_base || addr - ram_base > ram.len() as u64 - len as u64 {
+                        if self.debug { eprintln!("[virtio] T_IN addr {addr:#x} out of RAM"); }
                         success = false;
                         break;
+                    }
+                    let off = (addr - ram_base) as usize;
+                    match disk.read_exact(&mut ram[off..off + len as usize]) {
+                        Ok(()) => {
+                            if self.debug {
+                                let preview = &ram[off..off + len.min(16) as usize];
+                                eprintln!("[virtio] T_IN ok sector={sector} len={len} preview={preview:02x?}");
+                            }
+                        }
+                        Err(e) => {
+                            if self.debug { eprintln!("[virtio] T_IN read_exact err sector={sector}: {e}"); }
+                            success = false;
+                            break;
+                        }
                     }
                 }
                 success
@@ -227,13 +290,22 @@ impl VirtioBlk {
                 // Write host-readable data descriptors to disk.
                 let disk = self.disk.as_mut().unwrap();
                 if disk.seek(SeekFrom::Start(byte_off)).is_err() {
+                    if self.debug { eprintln!("[virtio] seek FAIL sector={sector}"); }
                     w8(ram, ram_base, status_addr, S_IOERR);
                     return;
                 }
                 let mut success = true;
                 for &(addr, len, flags) in data_descs {
                     if flags & DESC_F_WRITE != 0 { continue; }
+                    if addr < ram_base || addr - ram_base > ram.len() as u64 - len as u64 {
+                        if self.debug { eprintln!("[virtio] T_OUT addr {addr:#x} out of RAM"); }
+                        success = false;
+                        break;
+                    }
                     let off = (addr - ram_base) as usize;
+                    if self.debug {
+                        eprintln!("[virtio] T_OUT sector={sector} len={len} addr={addr:#x}");
+                    }
                     if disk.write_all(&ram[off..off + len as usize]).is_err() {
                         success = false;
                         break;

@@ -25,6 +25,10 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
+    /// Enable verbose virtio-blk MMIO logging on stderr (every load/store + queue processing)
+    #[arg(long)]
+    virtio_debug: bool,
+
     /// Raw kernel Image to load at 0x8020_0000 (requires --dtb)
     #[arg(long)]
     kernel: Option<String>,
@@ -84,7 +88,9 @@ fn main() -> Result<()> {
             .read(true).write(true)
             .open(disk_path)
             .with_context(|| format!("failed to open disk image {disk_path}"))?;
-        cpu.bus.virtio_blk = VirtioBlk::new(Some(file));
+        let mut vblk = VirtioBlk::new(Some(file));
+        vblk.debug = args.debug || args.virtio_debug;
+        cpu.bus.virtio_blk = vblk;
     }
 
     let has_disk = args.disk.is_some();
@@ -101,6 +107,13 @@ fn main() -> Result<()> {
     // The UART already suppresses \033[6n in its TX path (intercepted before it
     // reaches the host terminal), so the host never sends a CPR response — no
     // need to filter \033[...R sequences here.
+    // When stdin is not a TTY (piped input), mark the UART ready immediately.
+    // The \033[6n terminal-probe mechanism only fires when bash/dash detects a
+    // real TTY; piped input never triggers it, so bytes would be silently dropped.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        cpu.bus.uart.stdin_ready = true;
+    }
+
     let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
     std::thread::spawn(move || {
         use std::io::Read;
