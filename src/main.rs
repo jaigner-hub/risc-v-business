@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use riscv_emu::{cpu::Cpu, dtb, dtb::INITRD_BASE, loader};
+use riscv_emu::{cpu::{Cpu, PrivMode}, dtb, dtb::INITRD_BASE, loader, virtio_blk::VirtioBlk};
 use std::sync::mpsc;
 
 #[derive(Parser)]
@@ -17,6 +17,14 @@ struct Args {
     #[arg(long)]
     dtb: bool,
 
+    /// Enable experimental x86-64 JIT compilation (faster but may produce wrong results)
+    #[arg(long)]
+    jit: bool,
+
+    /// Enable emulator diagnostic messages on stderr (PC, mode, tick, JIT size, IRQ state)
+    #[arg(long)]
+    debug: bool,
+
     /// Raw kernel Image to load at 0x8020_0000 (requires --dtb)
     #[arg(long)]
     kernel: Option<String>,
@@ -24,6 +32,10 @@ struct Args {
     /// Initramfs CPIO image to load at 0x8600_0000 (requires --dtb)
     #[arg(long)]
     initrd: Option<String>,
+
+    /// Raw disk image to attach as virtio-blk /dev/vda (requires --dtb; disables initrd boot)
+    #[arg(long)]
+    disk: Option<String>,
 }
 
 const DTB_BASE: u64 = 0x8220_0000;
@@ -55,6 +67,9 @@ fn main() -> Result<()> {
     if args.kernel.is_some() && !args.dtb {
         anyhow::bail!("--kernel requires --dtb");
     }
+    if args.disk.is_some() && !args.dtb {
+        anyhow::bail!("--disk requires --dtb");
+    }
 
     let mut initrd_size: u64 = 0;
 
@@ -64,9 +79,17 @@ fn main() -> Result<()> {
     if let Some(ref initrd_path) = args.initrd {
         initrd_size = load_raw(&mut cpu.bus, initrd_path, INITRD_BASE)? as u64;
     }
+    if let Some(ref disk_path) = args.disk {
+        let file = std::fs::OpenOptions::new()
+            .read(true).write(true)
+            .open(disk_path)
+            .with_context(|| format!("failed to open disk image {disk_path}"))?;
+        cpu.bus.virtio_blk = VirtioBlk::new(Some(file));
+    }
 
+    let has_disk = args.disk.is_some();
     if args.dtb {
-        let dtb_bytes = dtb::build_dtb(initrd_size)
+        let dtb_bytes = dtb::build_dtb(initrd_size, has_disk)
             .context("failed to build device tree")?;
         let dtb_off = (DTB_BASE - RAM_BASE) as usize;
         cpu.bus.ram_mut()[dtb_off..dtb_off + dtb_bytes.len()].copy_from_slice(&dtb_bytes);
@@ -74,7 +97,10 @@ fn main() -> Result<()> {
         cpu.set_reg(11, DTB_BASE); // a1 = FDT pointer
     }
 
-    // Stdin reader thread feeds bytes into the UART RX buffer.
+    // Stdin reader: forward raw bytes to the UART RX channel.
+    // The UART already suppresses \033[6n in its TX path (intercepted before it
+    // reaches the host terminal), so the host never sends a CPR response — no
+    // need to filter \033[...R sequences here.
     let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
     std::thread::spawn(move || {
         use std::io::Read;
@@ -85,42 +111,146 @@ fn main() -> Result<()> {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     for &b in &buf[..n] {
-                        if stdin_tx.send(b).is_err() {
-                            return;
-                        }
+                        if stdin_tx.send(b).is_err() { return; }
                     }
                 }
             }
         }
     });
 
+    use riscv_emu::jit::JitCache;
+    let mut jit = JitCache::new();
+    let mut tick: u64 = 0;
+    let mut last_diag = std::time::Instant::now();
+    let mut last_pc: u64 = 0;
+    // Tick of last FENCE.I-triggered JIT flush. Rate-limited to avoid thrashing
+    // during ftrace's 39K consecutive FENCE.I patch burst.
+    let mut last_fence_i_flush: u64 = 0;
+    // Wall-clock reference for advancing mtime at a fixed 10 MHz regardless of
+    // emulation speed (interpreter vs JIT run at very different MIPS rates).
+    let mut last_clint_tick = std::time::Instant::now();
+
     loop {
-        cpu.step()?;
-        // Drain stdin → UART RX only after the shell prompt and DSR query are handled.
-        if cpu.bus.uart.stdin_ready {
-            while let Ok(byte) = stdin_rx.try_recv() {
-                cpu.bus.uart.push_rx(byte);
+        // Scale tick by estimated instructions per JIT block so CLINT fires every
+        // ~1024 guest instructions regardless of privilege mode:
+        //   M-mode JIT blocks: up to 128 instructions → tick += 64 → fires every ~16 blocks
+        //   S/U-mode JIT blocks: ~8 instructions avg  → tick += 8  → fires every 128 blocks
+        //   Interpreter step: 1 instruction            → tick += 1  → fires every 1024 steps
+        let tick_inc = if !args.jit {
+            cpu.step()?;
+            1
+        } else {
+            match jit.get(cpu.pc) {
+                Some(f) => {
+                    let mode = cpu.mode;
+                    let next = unsafe { f(cpu.regs.as_mut_ptr(), &mut cpu as *mut Cpu) };
+                    if next == u64::MAX {
+                        cpu.step()?;
+                        1
+                    } else {
+                        cpu.pc = next;
+                        if mode == PrivMode::M { 64 } else { 8 }
+                    }
+                }
+                None => {
+                    let pc = cpu.pc;
+                    cpu.step()?;
+                    if !cpu.jit_invalidate && !cpu.fence_i_pending {
+                        jit.compile(&mut cpu, pc);
+                    }
+                    1
+                }
+            }
+        };
+
+        // Immediate flush for satp PPN changes (address-translation change).
+        if cpu.jit_invalidate {
+            cpu.jit_invalidate = false;
+            jit.invalidate();
+        }
+
+        // Rate-limited flush for FENCE.I (instruction-cache fence after code patching).
+        // ftrace issues ~39K FENCE.I calls in a burst; flushing on each would thrash
+        // the JIT cache. Limit to one flush per 65536 ticks (~19ms at JIT speed) so
+        // the burst only causes ~handful of flushes while still catching jump_label
+        // patches that happen sparsely throughout boot.
+        if cpu.fence_i_pending {
+            cpu.fence_i_pending = false;
+            if tick.wrapping_sub(last_fence_i_flush) >= 65536 {
+                jit.invalidate();
+                last_fence_i_flush = tick;
             }
         }
-        if cpu.bus.clint.tick() {
-            cpu.csr.mip |= 1 << 7;    // set MTIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 7); // clear MTIP
-        }
-        // Sstc: STIP follows mtime vs stimecmp. Priv §15.
-        if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
-            cpu.csr.mip |= 1 << 5;    // set STIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 5); // clear STIP
-        }
-        // SEIP: set when UART has a pending interrupt routed through PLIC to S-mode.
-        // DTB declares UART at PLIC IRQ 10 (QEMU virt convention).
-        let uart_irq = cpu.bus.uart.irq_pending();
-        cpu.bus.plic.set_pending(10, uart_irq);
-        if cpu.bus.plic.has_interrupt() {
-            cpu.csr.mip |= 1 << 9;    // set SEIP
-        } else {
-            cpu.csr.mip &= !(1u64 << 9); // clear SEIP
+
+        tick = tick.wrapping_add(tick_inc);
+        if tick & 1023 == 0 {
+            // Drain stdin → UART RX only after the shell prompt is ready.
+            if cpu.bus.uart.stdin_ready {
+                while let Ok(byte) = stdin_rx.try_recv() {
+                    cpu.bus.uart.push_rx(byte);
+                }
+            }
+            // Advance mtime based on wall time at a 10 MHz timebase (100 ns/tick),
+            // matching the RISC-V virt platform. This keeps timer accuracy constant
+            // regardless of emulation speed.
+            let now_c = std::time::Instant::now();
+            let advance = now_c.duration_since(last_clint_tick).as_nanos() as u64 / 100;
+            if advance > 0 {
+                cpu.bus.clint.mtime = cpu.bus.clint.mtime.wrapping_add(advance);
+                last_clint_tick = now_c;
+            }
+            if cpu.bus.clint.mtime >= cpu.bus.clint.mtimecmp {
+                cpu.csr.mip |= 1 << 7;
+            } else {
+                cpu.csr.mip &= !(1u64 << 7);
+            }
+            // Sstc extension: only manage STIP from stimecmp when the kernel has
+            // explicitly written stimecmp (≠ default u64::MAX). Without Sstc the
+            // kernel uses SBI SET_TIMER → OpenSBI injects STIP via mip write; the
+            // unconditional 'else' branch was clearing that injection every batch.
+            if cpu.csr.stimecmp != u64::MAX {
+                if cpu.bus.clint.mtime >= cpu.csr.stimecmp {
+                    cpu.csr.mip |= 1 << 5;
+                } else {
+                    cpu.csr.mip &= !(1u64 << 5);
+                }
+            }
+            let uart_irq = cpu.bus.uart.irq_pending();
+            cpu.bus.plic.set_pending(10, uart_irq);
+            let virtio_irq = cpu.bus.virtio_blk.irq_status != 0;
+            cpu.bus.plic.set_pending(1, virtio_irq);
+            if cpu.bus.plic.has_interrupt() {
+                cpu.csr.mip |= 1 << 9;
+            } else {
+                cpu.csr.mip &= !(1u64 << 9);
+            }
+
+            // Deliver any pending interrupts now that mip is fully updated.
+            // JIT blocks execute without calling step(), so interrupts are never
+            // checked inside tight JIT loops (e.g. the WFI idle loop). Without this
+            // call the CPU would spin in the idle loop forever after mip is raised.
+            cpu.check_interrupts();
+
+            if args.debug {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_diag).as_millis() >= 2000 {
+                    last_diag = now;
+                    let mode_str = match cpu.mode {
+                        PrivMode::M => "M",
+                        PrivMode::S => "S",
+                        PrivMode::U => "U",
+                    };
+                    let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
+                    let mip = cpu.csr.mip;
+                    let mie = cpu.csr.mie;
+                    let sie = (cpu.csr.mstatus >> 1) & 1;
+                    eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit={:>5}  {}  \
+                               mip={:#06x} mie={:#06x} SIE={}",
+                              cpu.pc, mode_str, tick, jit.len(), moving,
+                              mip, mie, sie);
+                    last_pc = cpu.pc;
+                }
+            }
         }
     }
 }

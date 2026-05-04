@@ -585,57 +585,69 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let new_val = cpu.reg(rs1);
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
                 cpu.csr_write(csr, new_val);
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         Instruction::Csrrs { rd, rs1, csr } => {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let old = cpu.csr_read(csr);
                 let mask = cpu.reg(rs1);
                 if rs1 != 0 { cpu.csr_write(csr, old | mask); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && rs1 != 0 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         Instruction::Csrrc { rd, rs1, csr } => {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let old = cpu.csr_read(csr);
                 let mask = cpu.reg(rs1);
                 if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && rs1 != 0 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         Instruction::Csrrwi { rd, uimm, csr } => {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
                 cpu.csr_write(csr, uimm as u64);
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         Instruction::Csrrsi { rd, uimm, csr } => {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let old = cpu.csr_read(csr);
                 if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && uimm != 0 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         Instruction::Csrrci { rd, uimm, csr } => {
             if csr == 0x180 && cpu.mode == PrivMode::S && (cpu.csr.mstatus >> 20) & 1 != 0 {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 let old = cpu.csr_read(csr);
                 if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
                 cpu.set_reg(rd, old);
+                if csr == 0x180 && uimm != 0 && cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
             }
         },
         // --- M extension: integer multiply/divide ---

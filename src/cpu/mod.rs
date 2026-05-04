@@ -31,7 +31,7 @@ impl Tracer {
 }
 
 pub struct Cpu {
-    regs:   [u64; 32],
+    pub regs:   [u64; 32],
     /// Floating-point registers (F/D extension). Stored as u64 to hold either
     /// a 32-bit single (NaN-boxed in upper bits) or a 64-bit double.
     /// Phase 5: only FLW/FLD/FSW/FSD use these — no FP arithmetic implemented.
@@ -49,6 +49,14 @@ pub struct Cpu {
     /// Floating-point control and status register (CSR 0x003).
     /// Stub: not driven by FP arithmetic, but preserved across save/restore.
     pub fcsr: u32,
+    /// JIT block cache invalidation flag. Set by execute arms that change
+    /// address translation (satp write, sfence.vma) so the run loop can
+    /// flush JitCache before continuing.
+    pub jit_invalidate: bool,
+    /// Set by FENCE.I execution. The run loop rate-limits actual JIT flushes
+    /// from this source (to avoid thrashing during ftrace's 39K patch burst)
+    /// while still flushing for occasional jump_label patches.
+    pub fence_i_pending: bool,
 }
 
 // Compute trap PC per Priv §5.1.10: vectored mode dispatches interrupts to base + cause_code*4.
@@ -77,6 +85,8 @@ impl Cpu {
             mmu: mmu::Mmu::new(),
             inst_size: 4,
             fcsr: 0,
+            jit_invalidate: false,
+            fence_i_pending: false,
         }
     }
 
@@ -134,7 +144,7 @@ impl Cpu {
 
     /// Check for pending interrupts. Returns true if an interrupt was delivered.
     /// Priority order (highest first): MEI(11) > MSI(3) > MTI(7) > SEI(9) > SSI(1) > STI(5).
-    fn check_interrupts(&mut self) -> bool {
+    pub fn check_interrupts(&mut self) -> bool {
         let pending = self.csr.mip & self.csr.mie;
         if pending == 0 { return false; }
 
@@ -483,5 +493,63 @@ mod tests {
         assert_eq!(c.csr.scause, (1u64 << 63) | 5); // STI interrupt cause
         assert_eq!(c.mode, PrivMode::S);             // stays in S-mode (delegated)
         assert_eq!(c.csr.mcause, 0);                 // M-mode untouched
+    }
+
+    #[test]
+    fn satp_write_sets_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // Write satp with a new PPN (Sv39, PPN=1) — PPN changes from 0 → must invalidate.
+        c.set_reg(1, (8u64 << 60) | 1); // MODE=8 (Sv39), ASID=0, PPN=1
+        execute(&mut c, Instruction::Csrrw { rd: 0, rs1: 1, csr: 0x180 }).unwrap();
+        assert!(c.jit_invalidate, "writing satp with new PPN must set jit_invalidate");
+    }
+
+    #[test]
+    fn sfence_does_not_set_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        execute(&mut c, Instruction::SfenceVma).unwrap();
+        // sfence.vma only flushes the SW TLB; JIT blocks remain valid because
+        // VA→PA mappings don't change on permission-only PTE updates.
+        // Real address-space switches write satp, which sets jit_invalidate.
+        assert!(!c.jit_invalidate, "SFENCE.VMA must NOT set jit_invalidate");
+    }
+
+    #[test]
+    fn csrrwi_satp_ppn_change_sets_jit_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // csrwi satp, 1 — PPN changes from 0 → 1, must invalidate JIT.
+        execute(&mut c, Instruction::Csrrwi { rd: 0, uimm: 1, csr: 0x180 }).unwrap();
+        assert!(c.jit_invalidate, "csrwi satp with new PPN must set jit_invalidate");
+    }
+
+    #[test]
+    fn csrrwi_satp_same_ppn_no_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // Write satp with uimm=0 when satp is already 0: PPN unchanged, no invalidation.
+        execute(&mut c, Instruction::Csrrwi { rd: 0, uimm: 0, csr: 0x180 }).unwrap();
+        assert!(!c.jit_invalidate, "csrwi satp with same PPN must NOT set jit_invalidate");
+    }
+
+    #[test]
+    fn csrrs_satp_rs1_zero_does_not_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // CSRRS x0, satp, x0 — read-only, must NOT set jit_invalidate
+        execute(&mut c, Instruction::Csrrs { rd: 0, rs1: 0, csr: 0x180 }).unwrap();
+        assert!(!c.jit_invalidate, "Csrrs with rs1=0 must not set jit_invalidate");
     }
 }
