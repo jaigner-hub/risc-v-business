@@ -192,6 +192,12 @@ fn main() -> Result<()> {
                 cpu.csr.mip &= !(1u64 << 9);
             }
 
+            // Deliver any pending interrupts now that mip is fully updated.
+            // JIT blocks execute without calling step(), so interrupts are never
+            // checked inside tight JIT loops (e.g. the WFI idle loop). Without this
+            // call the CPU would spin in the idle loop forever after mip is raised.
+            cpu.check_interrupts();
+
             // Emit a diagnostic line to stderr every 5 seconds of wall time.
             // Shows whether the emulator is making forward progress (PC moving)
             // or is stuck in a tight loop, and which code range is hot.
