@@ -496,9 +496,10 @@ mod tests {
         use crate::cpu::decode::Instruction;
         let mut c = cpu();
         c.jit_invalidate = false;
-        // CSRW satp, x1 = CSRRW x0, satp(0x180), x1
+        // Write satp with a new PPN (Sv39, PPN=1) — PPN changes from 0 → must invalidate.
+        c.set_reg(1, (8u64 << 60) | 1); // MODE=8 (Sv39), ASID=0, PPN=1
         execute(&mut c, Instruction::Csrrw { rd: 0, rs1: 1, csr: 0x180 }).unwrap();
-        assert!(c.jit_invalidate, "writing satp must set jit_invalidate");
+        assert!(c.jit_invalidate, "writing satp with new PPN must set jit_invalidate");
     }
 
     #[test]
@@ -515,14 +516,25 @@ mod tests {
     }
 
     #[test]
-    fn csrrwi_satp_sets_jit_invalidate() {
+    fn csrrwi_satp_ppn_change_sets_jit_invalidate() {
         use crate::cpu::execute::execute;
         use crate::cpu::decode::Instruction;
         let mut c = cpu();
         c.jit_invalidate = false;
-        // csrwi satp, 0 — should still flush even with uimm=0
+        // csrwi satp, 1 — PPN changes from 0 → 1, must invalidate JIT.
+        execute(&mut c, Instruction::Csrrwi { rd: 0, uimm: 1, csr: 0x180 }).unwrap();
+        assert!(c.jit_invalidate, "csrwi satp with new PPN must set jit_invalidate");
+    }
+
+    #[test]
+    fn csrrwi_satp_same_ppn_no_invalidate() {
+        use crate::cpu::execute::execute;
+        use crate::cpu::decode::Instruction;
+        let mut c = cpu();
+        c.jit_invalidate = false;
+        // Write satp with uimm=0 when satp is already 0: PPN unchanged, no invalidation.
         execute(&mut c, Instruction::Csrrwi { rd: 0, uimm: 0, csr: 0x180 }).unwrap();
-        assert!(c.jit_invalidate, "csrwi satp must set jit_invalidate even with uimm=0");
+        assert!(!c.jit_invalidate, "csrwi satp with same PPN must NOT set jit_invalidate");
     }
 
     #[test]

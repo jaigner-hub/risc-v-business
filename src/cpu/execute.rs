@@ -512,11 +512,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             } else {
                 let new_val = cpu.reg(rs1);
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 cpu.csr_write(csr, new_val);
                 cpu.set_reg(rd, old);
                 if csr == 0x180 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
@@ -526,11 +527,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             } else {
                 let old = cpu.csr_read(csr);
                 let mask = cpu.reg(rs1);
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 if rs1 != 0 { cpu.csr_write(csr, old | mask); }
                 cpu.set_reg(rd, old);
                 if csr == 0x180 && rs1 != 0 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
@@ -540,11 +542,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
             } else {
                 let old = cpu.csr_read(csr);
                 let mask = cpu.reg(rs1);
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 if rs1 != 0 { cpu.csr_write(csr, old & !mask); }
                 cpu.set_reg(rd, old);
                 if csr == 0x180 && rs1 != 0 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
@@ -553,11 +556,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
                 let old = if rd != 0 { cpu.csr_read(csr) } else { 0 };
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 cpu.csr_write(csr, uimm as u64);
                 cpu.set_reg(rd, old);
                 if csr == 0x180 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
@@ -566,11 +570,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
                 let old = cpu.csr_read(csr);
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 if uimm != 0 { cpu.csr_write(csr, old | uimm as u64); }
                 cpu.set_reg(rd, old);
                 if csr == 0x180 && uimm != 0 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
@@ -579,11 +584,12 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                 cpu.deliver_trap(2, 0); next_pc = cpu.pc;
             } else {
                 let old = cpu.csr_read(csr);
+                let old_ppn = if csr == 0x180 { cpu.csr.satp & 0x0FFF_FFFF_FFFF } else { 0 };
                 if uimm != 0 { cpu.csr_write(csr, old & !(uimm as u64)); }
                 cpu.set_reg(rd, old);
                 if csr == 0x180 && uimm != 0 {
                     cpu.mmu.flush();
-                    cpu.jit_invalidate = true;
+                    if cpu.csr.satp & 0x0FFF_FFFF_FFFF != old_ppn { cpu.jit_invalidate = true; }
                 }
             }
         },
