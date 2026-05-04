@@ -204,11 +204,9 @@ fn main() -> Result<()> {
             // call the CPU would spin in the idle loop forever after mip is raised.
             cpu.check_interrupts();
 
-            // Emit a diagnostic line to stderr every 5 seconds of wall time.
-            // Shows whether the emulator is making forward progress (PC moving)
-            // or is stuck in a tight loop, and which code range is hot.
+            // Diagnostic every 2 seconds: PC, mode, tick, JIT size, interrupt state.
             let now = std::time::Instant::now();
-            if now.duration_since(last_diag).as_secs() >= 5 {
+            if now.duration_since(last_diag).as_millis() >= 2000 {
                 last_diag = now;
                 let mode_str = match cpu.mode {
                     PrivMode::M => "M",
@@ -216,8 +214,13 @@ fn main() -> Result<()> {
                     PrivMode::U => "U",
                 };
                 let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
-                eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit_blocks={:>5}  {}",
-                          cpu.pc, mode_str, tick, jit.len(), moving);
+                let mip = cpu.csr.mip;
+                let mie = cpu.csr.mie;
+                let sie = (cpu.csr.mstatus >> 1) & 1;
+                eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit={:>5}  {}  \
+                           mip={:#06x} mie={:#06x} SIE={}",
+                          cpu.pc, mode_str, tick, jit.len(), moving,
+                          mip, mie, sie);
                 last_pc = cpu.pc;
             }
         }
