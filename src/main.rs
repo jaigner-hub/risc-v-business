@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use riscv_emu::{cpu::{Cpu, PrivMode}, dtb, dtb::INITRD_BASE, loader};
+use riscv_emu::{cpu::{Cpu, PrivMode}, dtb, dtb::INITRD_BASE, loader, virtio_blk::VirtioBlk};
 use std::sync::mpsc;
 
 #[derive(Parser)]
@@ -17,9 +17,9 @@ struct Args {
     #[arg(long)]
     dtb: bool,
 
-    /// Disable JIT compilation (interpreter-only; slower but useful for debugging)
+    /// Enable experimental x86-64 JIT compilation (faster but may produce wrong results)
     #[arg(long)]
-    no_jit: bool,
+    jit: bool,
 
     /// Enable emulator diagnostic messages on stderr (PC, mode, tick, JIT size, IRQ state)
     #[arg(long)]
@@ -32,6 +32,10 @@ struct Args {
     /// Initramfs CPIO image to load at 0x8600_0000 (requires --dtb)
     #[arg(long)]
     initrd: Option<String>,
+
+    /// Raw disk image to attach as virtio-blk /dev/vda (requires --dtb; disables initrd boot)
+    #[arg(long)]
+    disk: Option<String>,
 }
 
 const DTB_BASE: u64 = 0x8220_0000;
@@ -63,6 +67,9 @@ fn main() -> Result<()> {
     if args.kernel.is_some() && !args.dtb {
         anyhow::bail!("--kernel requires --dtb");
     }
+    if args.disk.is_some() && !args.dtb {
+        anyhow::bail!("--disk requires --dtb");
+    }
 
     let mut initrd_size: u64 = 0;
 
@@ -72,9 +79,17 @@ fn main() -> Result<()> {
     if let Some(ref initrd_path) = args.initrd {
         initrd_size = load_raw(&mut cpu.bus, initrd_path, INITRD_BASE)? as u64;
     }
+    if let Some(ref disk_path) = args.disk {
+        let file = std::fs::OpenOptions::new()
+            .read(true).write(true)
+            .open(disk_path)
+            .with_context(|| format!("failed to open disk image {disk_path}"))?;
+        cpu.bus.virtio_blk = VirtioBlk::new(Some(file));
+    }
 
+    let has_disk = args.disk.is_some();
     if args.dtb {
-        let dtb_bytes = dtb::build_dtb(initrd_size)
+        let dtb_bytes = dtb::build_dtb(initrd_size, has_disk)
             .context("failed to build device tree")?;
         let dtb_off = (DTB_BASE - RAM_BASE) as usize;
         cpu.bus.ram_mut()[dtb_off..dtb_off + dtb_bytes.len()].copy_from_slice(&dtb_bytes);
@@ -111,6 +126,9 @@ fn main() -> Result<()> {
     // Tick of last FENCE.I-triggered JIT flush. Rate-limited to avoid thrashing
     // during ftrace's 39K consecutive FENCE.I patch burst.
     let mut last_fence_i_flush: u64 = 0;
+    // Wall-clock reference for advancing mtime at a fixed 10 MHz regardless of
+    // emulation speed (interpreter vs JIT run at very different MIPS rates).
+    let mut last_clint_tick = std::time::Instant::now();
 
     loop {
         // Scale tick by estimated instructions per JIT block so CLINT fires every
@@ -118,7 +136,7 @@ fn main() -> Result<()> {
         //   M-mode JIT blocks: up to 128 instructions → tick += 64 → fires every ~16 blocks
         //   S/U-mode JIT blocks: ~8 instructions avg  → tick += 8  → fires every 128 blocks
         //   Interpreter step: 1 instruction            → tick += 1  → fires every 1024 steps
-        let tick_inc = if args.no_jit {
+        let tick_inc = if !args.jit {
             cpu.step()?;
             1
         } else {
@@ -172,7 +190,16 @@ fn main() -> Result<()> {
                     cpu.bus.uart.push_rx(byte);
                 }
             }
-            if cpu.bus.clint.tick() {
+            // Advance mtime based on wall time at a 10 MHz timebase (100 ns/tick),
+            // matching the RISC-V virt platform. This keeps timer accuracy constant
+            // regardless of emulation speed.
+            let now_c = std::time::Instant::now();
+            let advance = now_c.duration_since(last_clint_tick).as_nanos() as u64 / 100;
+            if advance > 0 {
+                cpu.bus.clint.mtime = cpu.bus.clint.mtime.wrapping_add(advance);
+                last_clint_tick = now_c;
+            }
+            if cpu.bus.clint.mtime >= cpu.bus.clint.mtimecmp {
                 cpu.csr.mip |= 1 << 7;
             } else {
                 cpu.csr.mip &= !(1u64 << 7);
@@ -190,6 +217,8 @@ fn main() -> Result<()> {
             }
             let uart_irq = cpu.bus.uart.irq_pending();
             cpu.bus.plic.set_pending(10, uart_irq);
+            let virtio_irq = cpu.bus.virtio_blk.irq_status != 0;
+            cpu.bus.plic.set_pending(1, virtio_irq);
             if cpu.bus.plic.has_interrupt() {
                 cpu.csr.mip |= 1 << 9;
             } else {

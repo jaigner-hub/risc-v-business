@@ -6,3 +6,4 @@ pub mod jit;
 pub mod loader;
 pub mod plic;
 pub mod uart;
+pub mod virtio_blk;

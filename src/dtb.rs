@@ -5,9 +5,9 @@ pub const INITRD_BASE: u64 = 0x8600_0000;
 
 /// Build a Flattened Device Tree blob for the QEMU virt-like RISC-V machine.
 ///
-/// If `initrd_size > 0`, the `linux,initrd-start` and `linux,initrd-end` properties
-/// are added to the `chosen` node so the kernel can find the initramfs.
-pub fn build_dtb(initrd_size: u64) -> Result<Vec<u8>> {
+/// - `initrd_size > 0`: include `linux,initrd-start/end` in `chosen` and boot via initramfs.
+/// - `has_disk`: add a `virtio_mmio@10001000` node (IRQ 1) and set `root=/dev/vda rw` in bootargs.
+pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
     let mut fdt = FdtWriter::new()?;
 
     // Root node
@@ -20,10 +20,19 @@ pub fn build_dtb(initrd_size: u64) -> Result<Vec<u8>> {
     // chosen
     let chosen = fdt.begin_node("chosen")?;
     fdt.property_string("stdout-path", "/soc/serial@10000000")?;
-    fdt.property_string(
-        "bootargs",
-        "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb rdinit=/init",
-    )?;
+    if has_disk {
+        fdt.property_string(
+            "bootargs",
+            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb root=/dev/vda rw rootwait",
+        )?;
+    } else {
+        fdt.property_string(
+            "bootargs",
+            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb rdinit=/init",
+        )?;
+    }
+    // initrd is used both in initramfs-only mode (our busybox init) and alongside
+    // disk mode (Debian initrd loads virtio-blk modules then pivots to /dev/vda).
     if initrd_size > 0 {
         fdt.property_u64("linux,initrd-start", INITRD_BASE)?;
         fdt.property_u64("linux,initrd-end", INITRD_BASE + initrd_size)?;
@@ -98,6 +107,16 @@ pub fn build_dtb(initrd_size: u64) -> Result<Vec<u8>> {
     fdt.property_u32("interrupt-parent", 2)?;
     fdt.end_node(serial)?;
 
+    // virtio-mmio@10001000 — block device on IRQ 1
+    if has_disk {
+        let virtio = fdt.begin_node("virtio_mmio@10001000")?;
+        fdt.property_string("compatible", "virtio,mmio")?;
+        fdt.property_array_u32("reg", &[0x0000_0000, 0x1000_1000, 0x0000_0000, 0x0000_1000])?;
+        fdt.property_u32("interrupts", 1)?;
+        fdt.property_u32("interrupt-parent", 2)?;
+        fdt.end_node(virtio)?;
+    }
+
     fdt.end_node(soc)?;
     fdt.end_node(root)?;
 
@@ -110,8 +129,7 @@ mod tests {
 
     #[test]
     fn build_dtb_has_valid_fdt_magic() {
-        let bytes = build_dtb(0).unwrap();
-        // FDT magic: 0xD00DFEED in big-endian at offset 0
+        let bytes = build_dtb(0, false).unwrap();
         let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(magic, 0xD00D_FEED);
         assert!(bytes.len() > 64);
@@ -119,8 +137,7 @@ mod tests {
 
     #[test]
     fn build_dtb_with_initrd_includes_initrd_properties() {
-        let bytes = build_dtb(0x100_0000).unwrap(); // 16 MiB initrd
-        // Scan for the string "linux,initrd-start" in the FDT blob
+        let bytes = build_dtb(0x100_0000, false).unwrap();
         assert!(
             bytes.windows(18).any(|w| w == b"linux,initrd-start"),
             "expected linux,initrd-start property in DTB"
@@ -129,10 +146,19 @@ mod tests {
 
     #[test]
     fn build_dtb_without_initrd_omits_initrd_properties() {
-        let bytes = build_dtb(0).unwrap();
+        let bytes = build_dtb(0, false).unwrap();
         assert!(
             !bytes.windows(18).any(|w| w == b"linux,initrd-start"),
             "linux,initrd-start should not appear when initrd_size=0"
+        );
+    }
+
+    #[test]
+    fn build_dtb_with_disk_includes_virtio_node() {
+        let bytes = build_dtb(0, true).unwrap();
+        assert!(
+            bytes.windows(12).any(|w| w == b"virtio,mmio\0"),
+            "expected virtio,mmio compatible string in DTB"
         );
     }
 }

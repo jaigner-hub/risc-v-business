@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use crate::clint::Clint;
 use crate::plic::Plic;
 use crate::uart::Uart16550;
+use crate::virtio_blk::VirtioBlk;
 
 pub struct Bus {
     ram: Vec<u8>,
@@ -9,6 +10,7 @@ pub struct Bus {
     pub clint: Clint,
     pub uart: Uart16550,
     pub plic: Plic,
+    pub virtio_blk: VirtioBlk,
 }
 
 impl Bus {
@@ -19,6 +21,7 @@ impl Bus {
             clint: Clint::new(),
             uart: Uart16550::new(),
             plic: Plic::new(),
+            virtio_blk: VirtioBlk::new(None),
         }
     }
 
@@ -32,6 +35,7 @@ impl Bus {
             0x0200_0000..=0x0200_FFFF => Ok(self.clint.load(addr, width)),
             0x0C00_0000..=0x0FFF_FFFF => Ok(self.plic.load(addr, width)),
             0x1000_0000..=0x1000_00FF => Ok(self.uart.load(addr, width)),
+            0x1000_1000..=0x1000_11FF => Ok(self.virtio_blk.load(addr - 0x1000_1000, width)),
             _ => {
                 let off = self.offset(addr, width)?;
                 Ok(match width {
@@ -51,6 +55,14 @@ impl Bus {
             0x0200_0000..=0x0200_FFFF => { self.clint.store(addr, width, value); Ok(()) }
             0x0C00_0000..=0x0FFF_FFFF => { self.plic.store(addr, width, value); Ok(()) }
             0x1000_0000..=0x1000_00FF => { self.uart.store(addr, width, value); Ok(()) }
+            0x1000_1000..=0x1000_11FF => {
+                let notify = self.virtio_blk.store(addr - 0x1000_1000, width, value);
+                if notify {
+                    let base = self.ram_base;
+                    self.virtio_blk.process_queue(&mut self.ram, base);
+                }
+                Ok(())
+            }
             _ => {
                 let off = self.offset(addr, width)?;
                 match width {
