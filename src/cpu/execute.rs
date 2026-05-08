@@ -51,6 +51,75 @@ fn fclass_d(v: f64) -> u64 {
     else                                     { 1 << 4 } // +0
 }
 
+/// Load `width` bytes (1/2/4/8) from VA through the MMU. Returns the value
+/// (zero-extended to u64) or `(cause, tval)` describing the trap to deliver.
+///
+/// When the access spans a page boundary, each page is translated separately —
+/// a single VA can map to non-contiguous PAs, so writing 8 bytes contiguously
+/// from one PA would land in the wrong page (this was a real bug). Cross-page
+/// reads/writes go byte-by-byte; the slow path only triggers on misaligned
+/// accesses straddling the boundary.
+fn mmu_load(cpu: &mut Cpu, ls_mode: PrivMode, va: u64, width: usize) -> std::result::Result<u64, (u64, u64)> {
+    let page_off = (va & 0xFFF) as usize;
+    if page_off + width <= 0x1000 {
+        let pa = cpu.mmu
+            .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load)
+            .map_err(|f| (f.cause, f.tval))?;
+        return cpu.bus.load(pa, width).map_err(|_| (5, va));
+    }
+    let first = 0x1000 - page_off;
+    let va2 = (va & !0xFFF).wrapping_add(0x1000);
+    // f.tval comes back as the address that was passed in: va for pa1, va2 for pa2.
+    // Linux reads stval to find which PTE faulted, so the second-page fault MUST
+    // report va2 (not va) or the kernel walks the wrong PTE and re-faults forever.
+    let pa1 = cpu.mmu
+        .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load)
+        .map_err(|f| (f.cause, f.tval))?;
+    let pa2 = cpu.mmu
+        .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va2, AccessType::Load)
+        .map_err(|f| (f.cause, f.tval))?;
+    let mut v: u64 = 0;
+    for i in 0..first {
+        let b = cpu.bus.load(pa1.wrapping_add(i as u64), 1).map_err(|_| (5, va.wrapping_add(i as u64)))?;
+        v |= (b & 0xff) << (i * 8);
+    }
+    for i in 0..(width - first) {
+        let b = cpu.bus.load(pa2.wrapping_add(i as u64), 1).map_err(|_| (5, va2.wrapping_add(i as u64)))?;
+        v |= (b & 0xff) << ((first + i) * 8);
+    }
+    Ok(v)
+}
+
+/// Store `width` bytes (1/2/4/8) of `val` to VA through the MMU. Returns
+/// `(cause, tval)` if the access traps. Cross-page writes split per-page so
+/// each side hits its own translated PA.
+fn mmu_store(cpu: &mut Cpu, ls_mode: PrivMode, va: u64, width: usize, val: u64) -> std::result::Result<(), (u64, u64)> {
+    let page_off = (va & 0xFFF) as usize;
+    if page_off + width <= 0x1000 {
+        let pa = cpu.mmu
+            .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store)
+            .map_err(|f| (f.cause, f.tval))?;
+        return cpu.bus.store(pa, width, val).map_err(|_| (7, va));
+    }
+    let first = 0x1000 - page_off;
+    let va2 = (va & !0xFFF).wrapping_add(0x1000);
+    let pa1 = cpu.mmu
+        .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store)
+        .map_err(|f| (f.cause, f.tval))?;
+    let pa2 = cpu.mmu
+        .translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va2, AccessType::Store)
+        .map_err(|f| (f.cause, f.tval))?;
+    for i in 0..first {
+        let b = (val >> (i * 8)) & 0xff;
+        cpu.bus.store(pa1.wrapping_add(i as u64), 1, b).map_err(|_| (7, va.wrapping_add(i as u64)))?;
+    }
+    for i in 0..(width - first) {
+        let b = (val >> ((first + i) * 8)) & 0xff;
+        cpu.bus.store(pa2.wrapping_add(i as u64), 1, b).map_err(|_| (7, va2.wrapping_add(i as u64)))?;
+    }
+    Ok(())
+}
+
 pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
     let pc = cpu.pc;
 
@@ -166,94 +235,65 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // All addresses go through the MMU. Page faults deliver a trap and skip set_reg.
         Instruction::Lb  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 1) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, sext(v, 7)),
-                }
+            match mmu_load(cpu, ls_mode, va, 1) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, sext(v, 7)),
             }
         },
         Instruction::Lh  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 2) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, sext(v, 15)),
-                }
+            match mmu_load(cpu, ls_mode, va, 2) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, sext(v, 15)),
             }
         },
         Instruction::Lw  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 4) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, sext(v, 31)),
-                }
+            match mmu_load(cpu, ls_mode, va, 4) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, sext(v, 31)),
             }
         },
         Instruction::Ld  { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 8) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, v),
-                }
+            match mmu_load(cpu, ls_mode, va, 8) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, v),
             }
         },
         Instruction::Lbu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 1) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, v),
-                }
+            match mmu_load(cpu, ls_mode, va, 1) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, v),
             }
         },
         Instruction::Lhu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 2) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, v),
-                }
+            match mmu_load(cpu, ls_mode, va, 2) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, v),
             }
         },
         Instruction::Lwu { rd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 4) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => cpu.set_reg(rd, v),
-                }
+            match mmu_load(cpu, ls_mode, va, 4) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v)       => cpu.set_reg(rd, v),
             }
         },
 
         // --- Stores ---
         Instruction::Sb { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 1, cpu.reg(rs2)) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 1, cpu.reg(rs2)) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
         Instruction::Sh { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 2, cpu.reg(rs2)) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 2, cpu.reg(rs2)) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
         Instruction::Sw { rs1, rs2, imm } => {
@@ -274,23 +314,15 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
                     eprintln!("  a0={:#018x} a1={:#018x} a2={:#018x} a3={:#018x}", r[10], r[11], r[12], r[13]);
                 }
             }
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 4, cpu.reg(rs2)) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 4, cpu.reg(rs2)) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
         Instruction::Sd { rs1, rs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
             let val = cpu.reg(rs2);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 8, val) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 8, val) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
 
@@ -300,48 +332,34 @@ pub fn execute(cpu: &mut Cpu, inst: Instruction) -> Result<()> {
         // context save/restore (signal handlers, task switches) works.
         Instruction::Flw { fd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 4) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => {
-                        cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000 | (v & 0xFFFF_FFFF); // NaN-boxed
-                        cpu.csr.mstatus |= 0x6000; // FS = Dirty
-                    }
+            match mmu_load(cpu, ls_mode, va, 4) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v) => {
+                    cpu.fregs[fd] = 0xFFFF_FFFF_0000_0000 | (v & 0xFFFF_FFFF); // NaN-boxed
+                    cpu.csr.mstatus |= 0x6000; // FS = Dirty
                 }
             }
         },
         Instruction::Fld { fd, rs1, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Load) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.load(pa, 8) {
-                    Err(_) => { cpu.deliver_trap(5, va); next_pc = cpu.pc; }
-                    Ok(v)  => {
-                        cpu.fregs[fd] = v;
-                        cpu.csr.mstatus |= 0x6000; // FS = Dirty
-                    }
+            match mmu_load(cpu, ls_mode, va, 8) {
+                Err((c, t)) => { cpu.deliver_trap(c, t); next_pc = cpu.pc; }
+                Ok(v) => {
+                    cpu.fregs[fd] = v;
+                    cpu.csr.mstatus |= 0x6000; // FS = Dirty
                 }
             }
         },
         Instruction::Fsw { rs1, fs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 4, cpu.fregs[fs2]) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 4, cpu.fregs[fs2]) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
         Instruction::Fsd { rs1, fs2, imm } => {
             let va = cpu.reg(rs1).wrapping_add(imm as u64);
-            match cpu.mmu.translate(&mut cpu.bus, cpu.csr.satp, ls_mode, cpu.csr.mstatus, va, AccessType::Store) {
-                Err(f) => { cpu.deliver_trap(f.cause, f.tval); next_pc = cpu.pc; }
-                Ok(pa) => match cpu.bus.store(pa, 8, cpu.fregs[fs2]) {
-                    Err(_) => { cpu.deliver_trap(7, va); next_pc = cpu.pc; }
-                    Ok(_)  => {}
-                }
+            if let Err((c, t)) = mmu_store(cpu, ls_mode, va, 8, cpu.fregs[fs2]) {
+                cpu.deliver_trap(c, t); next_pc = cpu.pc;
             }
         },
 
