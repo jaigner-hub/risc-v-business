@@ -197,6 +197,10 @@ fn main() -> Result<()> {
 
         tick = tick.wrapping_add(tick_inc);
         if tick & 1023 == 0 {
+            // Push out any TX bytes still sitting in stdout's LineWriter buffer
+            // (e.g. a prompt without a trailing '\n').  Cheap when nothing is
+            // pending; runs once per 1024 instructions.
+            cpu.bus.uart.flush_pending();
             // Drain stdin → UART RX only after the shell prompt is ready.
             if cpu.bus.uart.stdin_ready {
                 while let Ok(byte) = stdin_rx.try_recv() {
@@ -256,11 +260,45 @@ fn main() -> Result<()> {
                     let moving = if cpu.pc != last_pc { "moving" } else { "STUCK" };
                     let mip = cpu.csr.mip;
                     let mie = cpu.csr.mie;
-                    let sie = (cpu.csr.mstatus >> 1) & 1;
+                    let sie  = (cpu.csr.mstatus >> 1) & 1;
+                    let spie = (cpu.csr.mstatus >> 5) & 1;
+                    let spp  = (cpu.csr.mstatus >> 8) & 1;
+                    let mtime  = cpu.bus.clint.mtime;
+                    let mtcmp  = cpu.bus.clint.mtimecmp;
+                    let stcmp  = cpu.csr.stimecmp;
+                    let dtm = mtcmp.wrapping_sub(mtime) as i64;
+                    let dts = stcmp.wrapping_sub(mtime) as i64;
                     eprintln!("[emu] pc={:#018x} mode={} tick={:>12} jit={:>5}  {}  \
-                               mip={:#06x} mie={:#06x} SIE={}",
+                               mip={:#06x} mie={:#06x} SIE={} SPIE={} SPP={}",
                               cpu.pc, mode_str, tick, jit.len(), moving,
-                              mip, mie, sie);
+                              mip, mie, sie, spie, spp);
+                    eprintln!("[tmr] mtime={} mtimecmp={} stimecmp={} dt_m={} dt_s={}",
+                              mtime, mtcmp,
+                              if stcmp == u64::MAX { -1i64 as u64 } else { stcmp },
+                              dtm, dts);
+                    let rx_total  = cpu.bus.uart.rx_bytes;
+                    let rx_drain  = cpu.bus.uart.rx_drained;
+                    eprintln!("[uart] rx_total={} rx_drained={} rx_pending={} stdin_ready={} tx_total={}",
+                              rx_total, rx_drain,
+                              rx_total.wrapping_sub(rx_drain),
+                              cpu.bus.uart.stdin_ready,
+                              cpu.bus.uart.tx_bytes);
+                    // virtio-blk state — to spot completions stuck unACKed (irq_status=1
+                    // for many seconds) or notifies dropped (avail_idx > last_avail_idx).
+                    let avail_addr = cpu.bus.virtio_blk.avail_addr;
+                    let used_addr  = cpu.bus.virtio_blk.used_addr;
+                    let q_ready    = cpu.bus.virtio_blk.queue_ready;
+                    let avail_idx_ram = if q_ready != 0 && avail_addr != 0 {
+                        cpu.bus.load(avail_addr.wrapping_add(2), 2).unwrap_or(0) as u16
+                    } else { 0 };
+                    let used_idx_ram = if q_ready != 0 && used_addr != 0 {
+                        cpu.bus.load(used_addr.wrapping_add(2), 2).unwrap_or(0) as u16
+                    } else { 0 };
+                    let plic_pend = cpu.bus.plic.has_interrupt();
+                    let vb = &cpu.bus.virtio_blk;
+                    eprintln!("[vio] ready={} status={:#x} irq={} last_avail={} avail_idx_ram={} used_idx_ram={} plic_pend={}",
+                              q_ready, vb.device_status, vb.irq_status,
+                              vb.last_avail_idx, avail_idx_ram, used_idx_ram, plic_pend);
                     last_pc = cpu.pc;
                 }
             }

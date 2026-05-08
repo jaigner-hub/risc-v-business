@@ -51,12 +51,12 @@ pub struct VirtioBlk {
     driver_features_sel: u32,
     pub device_status: u32,
     queue_num: u32,
-    queue_ready: u32,
-    desc_addr:  u64,        // guest PA of descriptor table
-    avail_addr: u64,        // guest PA of driver (available) ring
-    used_addr:  u64,        // guest PA of device (used) ring
-    pub irq_status: u32,    // bit 0 = used-buffer notification pending
-    last_avail_idx: u16,    // available ring index processed so far
+    pub queue_ready: u32,
+    desc_addr:  u64,            // guest PA of descriptor table
+    pub avail_addr: u64,        // guest PA of driver (available) ring
+    pub used_addr:  u64,        // guest PA of device (used) ring
+    pub irq_status: u32,        // bit 0 = used-buffer notification pending
+    pub last_avail_idx: u16,    // available ring index processed so far
 }
 
 impl VirtioBlk {

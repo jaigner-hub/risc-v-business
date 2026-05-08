@@ -1,3 +1,5 @@
 /target
 /images
 .worktrees
+run*.txt
+virtio-debug*.txt

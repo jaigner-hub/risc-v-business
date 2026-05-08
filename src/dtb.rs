@@ -24,7 +24,7 @@ pub fn build_dtb(initrd_size: u64, has_disk: bool) -> Result<Vec<u8>> {
     if has_disk {
         fdt.property_string(
             "bootargs",
-            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb root=/dev/vda rw rootwait rootflags=noatime,data=writeback ima=off nokaslr",
+            "console=ttyS0 earlycon=uart8250,mmio,0x10000000 TERM=dumb root=/dev/vda rw rootwait rootflags=noatime,data=writeback ima=off nokaslr lsm=lockdown,capability,landlock,yama,apparmor,tomoyo,ipe,ima,evm",
         )?;
     } else {
         fdt.property_string(
